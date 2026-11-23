@@ -1395,8 +1395,8 @@ class Operator_Behav(CyclicBehaviour):
         best_distance = -1
         for y in range(Environment_height):
             for x in range(Environment_width):
-                nearest = min(
-                    abs(x - a.x) + abs(y - a.y) for a in ambulances
+                nearest = min( # Evaluate distance from other ambulances as well as distance from walls
+                    min(abs(x - a.x) + abs(y - a.y), x, y, Environment_height-y, Environment_width-x) for a in ambulances
                 )
                 if nearest > best_distance:
                     best_distance = nearest
