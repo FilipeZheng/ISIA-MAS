@@ -106,6 +106,15 @@ AED_PLACEMENTS0 = (
     AgentPlacement("aed", "aed1@localhost", 16, 6),
 )
 
+# Test scenario for volunteer BDI reasoning
+VOLUNTEER_BDI_PLACEMENTS = (
+    AgentPlacement("person", "patient_bdi@localhost", 8, 6),
+    AgentPlacement("person", "bystander_bdi@localhost", 8, 5),
+    AgentPlacement("volunteer", "volunteer0@localhost", 5, 6),
+    AgentPlacement("volunteer", "volunteer1@localhost", 16, 6),
+    AgentPlacement("ambulance", "ambulance_bdi@localhost", 24, 14),
+)
+
 MULTIPLE_COLLAPSE_PLACEMENT = (
     AgentPlacement("person", "agent0@localhost", 5, 5,
                    walk_speed=2),
@@ -183,6 +192,14 @@ SCENARIOS = {
         "events": (
             collapse_at(0, "agent0@localhost", false_alarm=True),
             collapse_at(0, "agent1@localhost", false_alarm=False)
+        ),
+    },
+    
+    "volunteerBDI": {
+        "title": "Volunteer BDI Response (two volunteers)",
+        "placements": VOLUNTEER_BDI_PLACEMENTS,
+        "events": (
+            collapse_at(5, "patient_bdi@localhost"),
         ),
     },
     "dispatchModes": {
@@ -273,6 +290,14 @@ def _create_agent(placement):
         agent = WalkingAgent(placement.jid, "password")
     elif placement.kind == "aed":
         agent = AEDAgent(placement.jid, "password")
+    elif placement.kind == "volunteer":
+        agent = VolunteerAgent(
+            placement.jid, "password",
+            status="AVAILABLE",
+            training="basic",
+            has_firstAid=True,
+            bidding=current_volunteer_mode == VOLUNTEER_MODE_BIDDING,
+        )
     elif placement.kind == "ambulance":
         agent = EmergencyAmbulance(
             placement.jid, "password",
