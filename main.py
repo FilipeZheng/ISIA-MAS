@@ -4,7 +4,8 @@ The environment grid is served by the operator agent's built-in SPADE web
 interface (http://127.0.0.1:10000/spade/environment/). While a simulation is
 running the page refreshes itself every refresh_interval seconds. From that page
 you can preview the starting positions of a scenario, choose how ambulances are
-selected, start the selected scenario and stop the running simulation.
+selected, turn volunteer bidding and ambulance repositioning on or off, start
+the selected scenario and stop the running simulation.
 
 Run it with the virtual environment interpreter:
 
@@ -198,18 +199,109 @@ def _ambulance_mode_select(selected):
     ).format(options=options)
 
 
-def _scenario_controls(selected, ambulance_mode):
+def _hidden_inputs(selected, **values):
+    """Return hidden inputs that preserve the current page selections."""
+    hidden = ""
+    if selected is not None:
+        hidden += '<input type="hidden" name="scenario" value="{name}">'.format(
+            name=html.escape(selected, quote=True)
+        )
+    for name, value in values.items():
+        hidden += '<input type="hidden" name="{name}" value="{value}">'.format(
+            name=html.escape(name, quote=True),
+            value=html.escape(value, quote=True),
+        )
+    return hidden
+
+
+def _toggle_form(name, value, label, active, hidden):
+    """Return a GET form with one toggle button."""
+    return (
+        '<form class="mode-toggle" method="get" action="{path}">'
+        "{hidden}"
+        '<button class="scenario toggle{active}" type="submit" '
+        'name="{name}" value="{value}">{label}</button>'
+        "</form>"
+    ).format(
+        path=ENVIRONMENT_PATH,
+        hidden=hidden,
+        active=" selected" if active else "",
+        name=html.escape(name, quote=True),
+        value=html.escape(value, quote=True),
+        label=html.escape(label),
+    )
+
+
+def _volunteer_mode_button(selected, volunteer_mode, ambulance_mode,
+                           ambulance_reposition):
+    """Return the button that toggles whether volunteers bid for incidents."""
+    bidding = volunteer_mode == agents.VOLUNTEER_MODE_BIDDING
+    next_mode = (
+        agents.VOLUNTEER_MODE_CLOSEST if bidding else agents.VOLUNTEER_MODE_BIDDING
+    )
+    state = "on" if bidding else "off"
+    action = "turn off" if bidding else "turn on"
+    hidden = _hidden_inputs(
+        selected,
+        ambulance_mode=ambulance_mode,
+        ambulance_reposition=ambulance_reposition,
+    )
+    return _toggle_form(
+        "volunteer_mode",
+        next_mode,
+        f"Volunteer bidding: {state} ({action})",
+        bidding,
+        hidden,
+    )
+
+
+def _ambulance_reposition_button(selected, ambulance_mode, volunteer_mode,
+                                 ambulance_reposition):
+    """Return the button that toggles ambulance repositioning."""
+    enabled = ambulance_reposition == agents.AMBULANCE_REPOSITION_ON
+    next_mode = (
+        agents.AMBULANCE_REPOSITION_OFF if enabled
+        else agents.AMBULANCE_REPOSITION_ON
+    )
+    state = "on" if enabled else "off"
+    action = "turn off" if enabled else "turn on"
+    hidden = _hidden_inputs(
+        selected,
+        ambulance_mode=ambulance_mode,
+        volunteer_mode=volunteer_mode,
+    )
+    return _toggle_form(
+        "ambulance_reposition",
+        next_mode,
+        f"Ambulance repositioning: {state} ({action})",
+        enabled,
+        hidden,
+    )
+
+
+def _scenario_controls(selected, ambulance_mode, volunteer_mode,
+                       ambulance_reposition):
     """Return the scenario buttons and, when previewing, the start button."""
     if scenarios.simulation_running:
         return (
             '<form method="post" action="{path}">'
             '<button class="stop" type="submit">Stop simulation</button>'
             "</form>"
-            '<p class="hint">Ambulance selection: {mode}</p>'
+            '<p class="hint">Ambulance selection: {mode}<br>'
+            "Volunteer selection: {volunteer_mode}<br>"
+            "Ambulance repositioning: {ambulance_reposition}</p>"
         ).format(
             path=STOP_PATH,
             mode=html.escape(
                 scenarios.ambulance_mode_title(scenarios.current_ambulance_mode)
+            ),
+            volunteer_mode=html.escape(
+                scenarios.volunteer_mode_title(scenarios.current_volunteer_mode)
+            ),
+            ambulance_reposition=html.escape(
+                scenarios.ambulance_reposition_title(
+                    scenarios.current_ambulance_reposition
+                )
             ),
         )
 
@@ -223,17 +315,37 @@ def _scenario_controls(selected, ambulance_mode):
         for name in scenarios.scenario_names()
     )
     controls = (
-        '<form class="scenarios" method="get" action="{path}">{buttons}</form>'
-    ).format(path=ENVIRONMENT_PATH, buttons=buttons)
+        '<form class="scenarios" method="get" action="{path}">'
+        '<input type="hidden" name="ambulance_mode" value="{ambulance_mode}">'
+        '<input type="hidden" name="volunteer_mode" value="{volunteer_mode}">'
+        '<input type="hidden" name="ambulance_reposition" value="{reposition}">'
+        "{buttons}</form>"
+    ).format(
+        path=ENVIRONMENT_PATH,
+        ambulance_mode=html.escape(ambulance_mode, quote=True),
+        volunteer_mode=html.escape(volunteer_mode, quote=True),
+        reposition=html.escape(ambulance_reposition, quote=True),
+        buttons=buttons,
+    )
+
+    volunteer_toggle = _volunteer_mode_button(
+        selected, volunteer_mode, ambulance_mode, ambulance_reposition
+    )
+    reposition_toggle = _ambulance_reposition_button(
+        selected, ambulance_mode, volunteer_mode, ambulance_reposition
+    )
+    toggles = volunteer_toggle + reposition_toggle
 
     if selected is None:
-        return controls + (
+        return controls + toggles + (
             '<p class="hint">Choose a scenario to preview where its agents start.</p>'
         )
 
-    return controls + (
+    return controls + toggles + (
         '<form class="start-form" method="post" action="{action}">'
         '<input type="hidden" name="scenario" value="{name}">'
+        '<input type="hidden" name="volunteer_mode" value="{volunteer_mode}">'
+        '<input type="hidden" name="ambulance_reposition" value="{reposition}">'
         "{mode}"
         '<button class="start" type="submit">Start selected scenario</button>'
         "</form>"
@@ -241,6 +353,8 @@ def _scenario_controls(selected, ambulance_mode):
     ).format(
         action=START_PATH,
         name=html.escape(selected, quote=True),
+        volunteer_mode=html.escape(volunteer_mode, quote=True),
+        reposition=html.escape(ambulance_reposition, quote=True),
         mode=_ambulance_mode_select(ambulance_mode),
         environment=ENVIRONMENT_PATH,
     )
@@ -281,11 +395,16 @@ def _metrics_html():
     ).format(body=body)
 
 
-def render_environment_html(preview=None, ambulance_mode=None):
+def render_environment_html(preview=None, ambulance_mode=None, volunteer_mode=None,
+                            ambulance_reposition=None):
     """Build the HTML page showing the live environment or a scenario preview."""
     width, height = agents.Environment_width, agents.Environment_height
     if ambulance_mode not in agents.AMBULANCE_MODES:
         ambulance_mode = scenarios.current_ambulance_mode
+    if volunteer_mode not in agents.VOLUNTEER_MODES:
+        volunteer_mode = scenarios.current_volunteer_mode
+    if ambulance_reposition not in agents.AMBULANCE_REPOSITION_MODES:
+        ambulance_reposition = scenarios.current_ambulance_reposition
 
     if scenarios.simulation_running:
         preview = None
@@ -437,7 +556,9 @@ def render_environment_html(preview=None, ambulance_mode=None):
         counts=html.escape(counts),
         status=html.escape(status),
         status_class=status_class,
-        controls=_scenario_controls(preview, ambulance_mode),
+        controls=_scenario_controls(
+            preview, ambulance_mode, volunteer_mode, ambulance_reposition
+        ),
         metrics=metrics_html,
         cells="\n".join(cells),
     )
@@ -484,8 +605,16 @@ class WebOperator(agents.Operator):
         ambulance_mode = request.query.get("ambulance_mode")
         if ambulance_mode not in agents.AMBULANCE_MODES:
             ambulance_mode = scenarios.current_ambulance_mode
+        volunteer_mode = request.query.get("volunteer_mode")
+        if volunteer_mode not in agents.VOLUNTEER_MODES:
+            volunteer_mode = scenarios.current_volunteer_mode
+        ambulance_reposition = request.query.get("ambulance_reposition")
+        if ambulance_reposition not in agents.AMBULANCE_REPOSITION_MODES:
+            ambulance_reposition = scenarios.current_ambulance_reposition
         return aioweb.Response(
-            text=render_environment_html(preview, ambulance_mode),
+            text=render_environment_html(
+                preview, ambulance_mode, volunteer_mode, ambulance_reposition
+            ),
             content_type="text/html",
             headers={"Cache-Control": "no-store"},
         )
@@ -498,11 +627,26 @@ class WebOperator(agents.Operator):
         ambulance_mode = data.get("ambulance_mode", agents.AMBULANCE_MODE_CLOSEST)
         if ambulance_mode not in agents.AMBULANCE_MODES:
             ambulance_mode = agents.AMBULANCE_MODE_CLOSEST
-        if scenarios.start_simulation(name, ambulance_mode=ambulance_mode):
+        volunteer_mode = data.get("volunteer_mode", agents.VOLUNTEER_MODE_BIDDING)
+        if volunteer_mode not in agents.VOLUNTEER_MODES:
+            volunteer_mode = agents.VOLUNTEER_MODE_BIDDING
+        ambulance_reposition = data.get(
+            "ambulance_reposition", agents.AMBULANCE_REPOSITION_OFF
+        )
+        if ambulance_reposition not in agents.AMBULANCE_REPOSITION_MODES:
+            ambulance_reposition = agents.AMBULANCE_REPOSITION_OFF
+        if scenarios.start_simulation(
+            name, ambulance_mode=ambulance_mode, volunteer_mode=volunteer_mode,
+            ambulance_reposition=ambulance_reposition,
+        ):
             logger.info(
-                "%s started from the web interface (ambulance selection: %s).",
+                "%s started from the web interface "
+                "(ambulance selection: %s; volunteer selection: %s; "
+                "ambulance repositioning: %s).",
                 scenarios.scenario_title(name),
                 scenarios.ambulance_mode_title(ambulance_mode),
+                scenarios.volunteer_mode_title(volunteer_mode),
+                scenarios.ambulance_reposition_title(ambulance_reposition),
             )
         raise aioweb.HTTPFound(ENVIRONMENT_PATH)
 

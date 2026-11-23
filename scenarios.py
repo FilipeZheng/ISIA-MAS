@@ -19,6 +19,11 @@ import spade
 from agents import (
     AMBULANCE_MODE_CLOSEST,
     AMBULANCE_MODES,
+    AMBULANCE_REPOSITION_MODES,
+    AMBULANCE_REPOSITION_OFF,
+    AMBULANCE_REPOSITION_ON,
+    VOLUNTEER_MODE_BIDDING,
+    VOLUNTEER_MODES,
     Ambulances,
     EmergencyAmbulance,
     Environment,
@@ -42,6 +47,8 @@ class AgentPlacement:
     y: int
     target: tuple = None
     walk_speed: float = None
+    has_aed: bool = False           # only used by ambulances
+    volunteer_status: str = "AVAILABLE"   # only used by volunteers
 
 
 @dataclass(frozen=True)
@@ -53,16 +60,18 @@ class ScenarioEvent:
     description: str = ""
 
 
-def collapse_at(seconds, jid, false_alarm=False):
+def collapse_at(seconds, jid, false_alarm=False, severity=1):
     """Return an event that makes the given agent collapse at ``seconds``.
 
     Set ``false_alarm=True`` for a collapse that only needs a volunteer (the
     ambulance is stood down once a volunteer or an ambulance identifies it).
+    Set ``severity=3`` for a collapse that needs an AED (unless the responding
+    ambulance carries one).
     """
     async def action(spawned):
         agent = spawned.get(jid)
         if agent is not None:
-            await agent.collapse(false_alarm=false_alarm)
+            await agent.collapse(false_alarm=false_alarm, severity=severity)
 
     return ScenarioEvent(seconds, action, f"{jid} collapses")
 
@@ -105,6 +114,21 @@ MULTIPLE_COLLAPSE_VOLUNTEER = (
     AgentPlacement("volunteer", "volunteer0@localhost", 0, 8),
 )
 
+# Two collapses that the ambulance-selection mode has to handle differently:
+# a severity-3 collapse (needs an AED) and a severity-1 collapse, with one
+# ambulance nearby (no AED) and one far away (carries an AED). The second
+# victim is an off-duty volunteer so it does not walk towards the first
+# collapse before it goes down itself.
+DISPATCH_MODE_PLACEMENT = (
+    AgentPlacement("person", "agent0@localhost", 3, 5),
+    AgentPlacement("person", "bystander0@localhost", 3, 3),
+    AgentPlacement("volunteer", "agent1@localhost", 3, 6,
+                   volunteer_status="OFF_DUTY"),
+    AgentPlacement("ambulance", "ambulance0@localhost", 0, 6),
+    AgentPlacement("ambulance", "ambulance1@localhost", 24, 14,
+                   has_aed=True),
+)
+
 HOSPITAL_POSITION = (8, 8)
 
 SCENARIOS = {
@@ -145,6 +169,14 @@ SCENARIOS = {
             collapse_at(0, "agent1@localhost", false_alarm=False)
         ),
     },
+    "dispatchModes": {
+        "title": "Ambulance dispatch modes (closest / reassign / bidding)",
+        "placements": DISPATCH_MODE_PLACEMENT,
+        "events": (
+            collapse_at(5, "agent0@localhost", severity=3),
+            collapse_at(7, "agent1@localhost", severity=1),
+        ),
+    },
 }
 
 simulation_running = False
@@ -152,6 +184,8 @@ simulation_agents = []
 simulation_task = None
 current_scenario = None
 current_ambulance_mode = AMBULANCE_MODE_CLOSEST
+current_volunteer_mode = VOLUNTEER_MODE_BIDDING
+current_ambulance_reposition = AMBULANCE_REPOSITION_OFF
 operator = None
 
 
@@ -163,6 +197,23 @@ def ambulance_mode_names():
 def ambulance_mode_title(mode):
     """Return the human readable name of an ambulance selection mode."""
     return AMBULANCE_MODES.get(mode, AMBULANCE_MODES[AMBULANCE_MODE_CLOSEST])
+
+
+def volunteer_mode_names():
+    """Return the available volunteer selection modes."""
+    return list(VOLUNTEER_MODES)
+
+
+def volunteer_mode_title(mode):
+    """Return the human readable name of a volunteer selection mode."""
+    return VOLUNTEER_MODES.get(mode, VOLUNTEER_MODES[VOLUNTEER_MODE_BIDDING])
+
+
+def ambulance_reposition_title(mode):
+    """Return the human readable name of an ambulance reposition mode."""
+    return AMBULANCE_REPOSITION_MODES.get(
+        mode, AMBULANCE_REPOSITION_MODES[AMBULANCE_REPOSITION_OFF]
+    )
 
 
 def scenario_names():
@@ -206,11 +257,16 @@ def _create_agent(placement):
         return WalkingAgent(placement.jid, "password")
     if placement.kind == "volunteer":
         return VolunteerAgent(
-            placement.jid, "password", status="AVAILABLE",
+            placement.jid, "password", status=placement.volunteer_status,
             training="basic", has_firstAid=True,
+            bidding=current_volunteer_mode == VOLUNTEER_MODE_BIDDING,
         )
     if placement.kind == "ambulance":
-        return EmergencyAmbulance(placement.jid, "password")
+        return EmergencyAmbulance(
+            placement.jid, "password",
+            has_aed=placement.has_aed,
+            reposition=current_ambulance_reposition == AMBULANCE_REPOSITION_ON,
+        )
     raise ValueError(f"Unknown agent kind: {placement.kind}")
 
 
@@ -281,6 +337,8 @@ async def run_simulation(name):
     global simulation_running
     if operator is not None:
         operator.ambulance_mode = current_ambulance_mode
+        operator.volunteer_mode = current_volunteer_mode
+        operator.ambulance_reposition = current_ambulance_reposition
     try:
         spawned = await setup_scenario(name)
         await simulation_loop(SCENARIOS[name]["events"], spawned)
@@ -288,22 +346,33 @@ async def run_simulation(name):
         simulation_running = False
 
 
-def start_simulation(name="default", ambulance_mode=AMBULANCE_MODE_CLOSEST):
+def start_simulation(name="default", ambulance_mode=AMBULANCE_MODE_CLOSEST,
+                     volunteer_mode=VOLUNTEER_MODE_BIDDING,
+                     ambulance_reposition=AMBULANCE_REPOSITION_OFF):
     """Start a scenario. Returns False if one is already running."""
     global simulation_running, simulation_task, current_scenario
-    global current_ambulance_mode
+    global current_ambulance_mode, current_volunteer_mode
+    global current_ambulance_reposition
     if name not in SCENARIOS:
         raise ValueError(f"Unknown scenario: {name}")
     if simulation_running:
         return False
     if ambulance_mode not in AMBULANCE_MODES:
         ambulance_mode = AMBULANCE_MODE_CLOSEST
+    if volunteer_mode not in VOLUNTEER_MODES:
+        volunteer_mode = VOLUNTEER_MODE_BIDDING
+    if ambulance_reposition not in AMBULANCE_REPOSITION_MODES:
+        ambulance_reposition = AMBULANCE_REPOSITION_OFF
     simulation_running = True
     current_scenario = name
     current_ambulance_mode = ambulance_mode
+    current_volunteer_mode = volunteer_mode
+    current_ambulance_reposition = ambulance_reposition
     Metrics.reset()
     if operator is not None:
         operator.ambulance_mode = ambulance_mode
+        operator.volunteer_mode = volunteer_mode
+        operator.ambulance_reposition = ambulance_reposition
     simulation_task = asyncio.create_task(run_simulation(name))
     return True
 
@@ -311,7 +380,8 @@ def start_simulation(name="default", ambulance_mode=AMBULANCE_MODE_CLOSEST):
 async def stop_simulation():
     """Stop the running scenario, shut its agents down and clear the grid."""
     global simulation_running, simulation_agents, simulation_task
-    global current_scenario, current_ambulance_mode
+    global current_scenario, current_ambulance_mode, current_volunteer_mode
+    global current_ambulance_reposition
     if not simulation_running and not simulation_agents:
         return False
 
@@ -330,13 +400,18 @@ async def stop_simulation():
 
     reset_environment()
     current_ambulance_mode = AMBULANCE_MODE_CLOSEST
+    current_volunteer_mode = VOLUNTEER_MODE_BIDDING
+    current_ambulance_reposition = AMBULANCE_REPOSITION_OFF
     if operator is not None:
         operator.reported_incidents.clear()
         operator.pending_offers.clear()
+        operator.pending_ambulance_offers.clear()
         operator.dispatched_ambulances.clear()
         operator.busy_ambulances.clear()
         operator.handled_incidents.clear()
         operator.ambulance_mode = AMBULANCE_MODE_CLOSEST
+        operator.volunteer_mode = VOLUNTEER_MODE_BIDDING
+        operator.ambulance_reposition = AMBULANCE_REPOSITION_OFF
 
     current_scenario = None
     return True

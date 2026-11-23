@@ -28,10 +28,36 @@ diry = [1,0,-1,0,0]
 # How the operator chooses which ambulance responds to a collapse.
 AMBULANCE_MODE_CLOSEST = "closest"
 AMBULANCE_MODE_REASSIGN = "reassign"
+AMBULANCE_MODE_BIDDING = "bidding"
 AMBULANCE_MODES = {
     AMBULANCE_MODE_CLOSEST: "Closest free ambulance (default)",
     AMBULANCE_MODE_REASSIGN: "Reassign if a closer ambulance becomes free",
+    AMBULANCE_MODE_BIDDING: "Bidding (ambulances offer, best value wins)",
 }
+
+# Extra bid value for an ambulance that carries an AED.
+AED_BID_BONUS = 10
+# Bid penalty for an ambulance without an AED when one is required.
+AED_MISSING_PENALTY = 100
+
+# How the operator chooses which volunteer responds to a collapse.
+VOLUNTEER_MODE_BIDDING = "bidding"
+VOLUNTEER_MODE_CLOSEST = "closest"
+VOLUNTEER_MODES = {
+    VOLUNTEER_MODE_BIDDING: "Bidding (volunteers offer, closest wins)",
+    VOLUNTEER_MODE_CLOSEST: "Closest available volunteer (no bidding)",
+}
+
+# Whether a free ambulance repositions itself before going idle again.
+AMBULANCE_REPOSITION_OFF = "off"
+AMBULANCE_REPOSITION_ON = "on"
+AMBULANCE_REPOSITION_MODES = {
+    AMBULANCE_REPOSITION_OFF: "Off (stay where it is)",
+    AMBULANCE_REPOSITION_ON: "On (move to the spot furthest from other ambulances)",
+}
+
+# A collapse of this severity needs an AED, unless the responder carries one.
+AED_REQUIRED_SEVERITY = 3
 
 
 class SimulationMetrics:
@@ -359,6 +385,7 @@ class WalkingAgent(Agent):
     diverted=False  #1 while a bystander is walking towards a victim
     resume_target=None  #Walk to resume once the bystander is free again
     false_alarm=0   #1 when the collapse does not actually need an ambulance
+    severity=1      #Higher values are more serious; 3 needs an AED
     # Only volunteers and ambulances can tell a false alarm from a real one.
     can_identify_collapse=False
     async def setup(self):
@@ -410,7 +437,7 @@ class WalkingAgent(Agent):
     async def at_hospital(self):
         return any(type(i)==Hospital for i in Environment[self.y][self.x])
 
-    async def collapse(self, false_alarm=False):
+    async def collapse(self, false_alarm=False, severity=1):
         """Collapse where the agent is.
 
         Args:
@@ -418,12 +445,15 @@ class WalkingAgent(Agent):
                 like a collapse (bystanders report it and the operator reacts),
                 but only a volunteer or an ambulance that reaches the agent can
                 identify that no ambulance transport is needed.
+            severity (int): how serious the collapse is. Severity 3 needs an
+                AED unless the responding ambulance carries one.
         """
         for behav in self.behaviours:
             behav.kill()
 
         self.collapsed = 1
         self.false_alarm = 1 if false_alarm else 0
+        self.severity = severity
         self.helper = None
         Metrics.record_collapse(self, false_alarm)
         # Call the people around for help; a bystander will report the collapse
@@ -449,6 +479,7 @@ class WalkingAgent(Agent):
             behav.kill()
         self.collapsed = 0
         self.false_alarm = 0
+        self.severity = 1
         self.helper = None
         self.add_behaviour(ByStand())
 
@@ -465,6 +496,11 @@ in_H = 'IN_H'
 class Idling(State):
     async def run(self):
         agent = self.agent
+        if (getattr(agent, "reposition", False)
+                and getattr(agent, "reposition_pending", False)):
+            if await self.reposition() == "HELP":
+                self.set_next_state(moving)
+                return
         await agent.move_randomly(4)
         while 1:
             msg = await self.receive()
@@ -474,7 +510,70 @@ class Idling(State):
                     await agent.move_to(*map(int,body),0.5)
                     self.set_next_state(moving)
                     return
+                if msg_type=="BID":
+                    try:
+                        x, y, severity = map(int, body)
+                    except ValueError:
+                        pass
+                    else:
+                        value = agent.bid_value(x, y, severity)
+                        offer = Message(to="operator@localhost")
+                        offer.set_metadata("performative", "inform")
+                        offer.body = f"AMBULANCE_OFFER {x} {y} {value}"
+                        await self.send(offer)
+                        print(
+                            f"[{agent.jid}] Bid {value} for ({x}, {y})"
+                        )
+                if msg_type=="ASSIGN":
+                    try:
+                        x, y = map(int, body)
+                    except ValueError:
+                        pass
+                    else:
+                        await agent.move_to(x, y, 0.5)
+                        self.set_next_state(moving)
+                        return
             await asyncio.sleep(1)
+
+    async def reposition(self):
+        """Ask the operator for a spot far from the other ambulances."""
+        agent = self.agent
+        agent.reposition_pending = False
+
+        request = Message(to="operator@localhost")
+        request.set_metadata("performative", "inform")
+        request.body = f"REQUEST_POSITION {agent.x} {agent.y}"
+        await self.send(request)
+
+        deadline = asyncio.get_running_loop().time() + 3
+        while asyncio.get_running_loop().time() < deadline:
+            msg = await self.receive(timeout=0.5)
+            if msg is None:
+                continue
+            parts = msg.body.split()
+            if len(parts) == 3 and parts[0] == "POSITION":
+                try:
+                    x, y = map(int, parts[1:])
+                except ValueError:
+                    return None
+                if not within_E(x, y):
+                    return None
+                await agent.move_to(x, y)
+                while not agent.walk_behaviour.is_killed():
+                    await asyncio.sleep(0.5)
+                print(f"[{agent.jid}] Repositioned to ({x}, {y})")
+                return None
+            if len(parts) == 1 and parts[0] == "STAY":
+                return None
+            if len(parts) == 3 and parts[0] == "HELP":
+                try:
+                    x, y = map(int, parts[1:])
+                except ValueError:
+                    return None
+                await agent.move_to(x, y, 0.5)
+                return "HELP"
+        return None
+
 class Moving(State):
     async def run(self):
         agent = self.agent
@@ -494,6 +593,7 @@ class Moving(State):
                             if not agent.walk_behaviour.is_killed():
                                 agent.walk_behaviour.kill()
                             print(f"[{agent.jid}] Response to ({x}, {y}) cancelled")
+                            agent.reposition_pending = True
                             self.set_next_state(idling)
                             return
             if agent.walk_behaviour.is_killed():
@@ -532,6 +632,7 @@ class Helping(State):
 
         if not picked_up:
             # There is nothing to transport (no patient, or only false alarms).
+            agent.reposition_pending = True
             self.set_next_state(idling)
             return
 
@@ -562,6 +663,7 @@ class In_H(State):
         report.body = "IN_SERVICE"
         await self.send(report)
         print(f"[{agent.jid}] Back in service")
+        agent.reposition_pending = True
         self.set_next_state(idling)
 
 class EmergencyAmbulance(WalkingAgent):
@@ -570,11 +672,29 @@ class EmergencyAmbulance(WalkingAgent):
 
     #attribute definitions
     behav = None
+    has_aed = False
 
-    def __init__(self, jid, password):
+    def __init__(self, jid, password, has_aed=False, reposition=False):
         super().__init__(jid, password)
         self.behav = None
         self.agents_on_board = set()
+        self.has_aed = has_aed
+        self.reposition = reposition
+        self.reposition_pending = False
+
+    def needs_aed_agent(self, severity):
+        """Whether a separate AED agent is needed for a collapse."""
+        return severity >= AED_REQUIRED_SEVERITY and not self.has_aed
+
+    def bid_value(self, x, y, severity=1):
+        """Return this ambulance's bid for an incident; higher is better."""
+        distance = abs(self.x - x) + abs(self.y - y)
+        value = -distance
+        if self.has_aed:
+            value += AED_BID_BONUS
+        elif severity >= AED_REQUIRED_SEVERITY:
+            value -= AED_MISSING_PENALTY
+        return value
     #add other things to put in this
 
 
@@ -669,7 +789,11 @@ class VolunteerFSM(FSMBehaviour):
                         pass
                     else:
                         coords = (x, y)
-                        if coords in volunteer.offered and volunteer.can_respond():
+                        # With bidding the volunteer must have offered for this
+                        # incident first. Without bidding the operator picks
+                        # the volunteer and assigns it directly.
+                        accepts = coords in volunteer.offered or not volunteer.bidding
+                        if accepts and volunteer.can_respond():
                             volunteer.current_assign = coords
                             volunteer.intention = {"goal": "assist_patient", "target": coords}
                             print(f"[{volunteer.jid}] Accepted assignment {coords}")
@@ -775,7 +899,7 @@ class VolunteerAgent(WalkingAgent):
     can_identify_collapse = True
 
     def __init__(self, jid, password, status="AVAILABLE", training="basic",
-                 has_firstAid=True, max_distance=30):
+                 has_firstAid=True, max_distance=30, bidding=True):
         super().__init__(jid, password)
         self.x, self.y = None, None
         self.target_x, self.target_y = None, None
@@ -785,6 +909,7 @@ class VolunteerAgent(WalkingAgent):
         self.training = training
         self.has_firstAid = has_firstAid
         self.max_distance = max_distance
+        self.bidding = bidding
         self.current_assign = None
         self.offered = set()
         self.beliefs = {"on_duty": self.on_duty, "known_incidents": {}, "patient_confirmed": False}
@@ -876,6 +1001,38 @@ class Operator_Behav(CyclicBehaviour):
 
             del operator.pending_offers[coords]
 
+        # Select the ambulance with the best bid after collecting offers.
+        now = asyncio.get_running_loop().time()
+        for coords, incident in list(operator.pending_ambulance_offers.items()):
+            if now < incident["deadline"]:
+                continue
+
+            offers = [
+                (value, ambulance_jid)
+                for value, ambulance_jid in incident["offers"]
+                if ambulance_jid not in operator.busy_ambulances
+            ]
+
+            if offers:
+                value, ambulance_jid = max(offers)
+
+                assignment = Message(to=ambulance_jid)
+                assignment.set_metadata("performative", "inform")
+                assignment.body = f"ASSIGN {coords[0]} {coords[1]}"
+                await self.send(assignment)
+
+                operator.dispatched_ambulances[coords] = ambulance_jid
+                operator.busy_ambulances.add(ambulance_jid)
+                print(
+                    f"[Operator] Assigned {coords} to {ambulance_jid} "
+                    f"with bid {value}"
+                )
+            else:
+                print(f"[Operator] No ambulance bid for {coords}")
+                await self.dispatch_closest_ambulance(coords)
+
+            del operator.pending_ambulance_offers[coords]
+
     async def handle_message(self, msg):
         operator = self.agent
         parts = msg.body.split()
@@ -896,6 +1053,19 @@ class Operator_Behav(CyclicBehaviour):
                     (distance, str(msg.sender))
                 )
 
+        elif len(parts) == 4 and parts[0] == "AMBULANCE_OFFER":
+            try:
+                x, y, value = map(int, parts[1:])
+            except ValueError:
+                return
+
+            incident = operator.pending_ambulance_offers.get((x, y))
+
+            if incident is not None:
+                incident["offers"].append(
+                    (value, str(msg.sender))
+                )
+
         elif len(parts) == 3 and parts[0] == "CONFIRMED":
             print(f"[Operator] Volunteer confirmed {parts[1:]}")
 
@@ -906,8 +1076,9 @@ class Operator_Behav(CyclicBehaviour):
                 return
 
             coords = (x, y)
-            # No volunteer assignment is needed any more...
+            # No volunteer or ambulance assignment is needed any more...
             operator.pending_offers.pop(coords, None)
+            operator.pending_ambulance_offers.pop(coords, None)
             # ...and an ambulance that is already on its way can be stood
             # down (it is not needed for a false alarm).
             ambulance_jid = operator.dispatched_ambulances.pop(coords, None)
@@ -933,6 +1104,13 @@ class Operator_Behav(CyclicBehaviour):
         elif len(parts) == 1 and parts[0] == "IN_SERVICE":
             await self.release_ambulance(str(msg.sender))
 
+        elif len(parts) == 3 and parts[0] == "REQUEST_POSITION":
+            try:
+                x, y = map(int, parts[1:])
+            except ValueError:
+                return
+            await self.handle_reposition_request(msg, (x, y))
+
     async def handle_collapse(self, msg, parts):
         operator = self.agent
         try:
@@ -950,19 +1128,24 @@ class Operator_Behav(CyclicBehaviour):
         if coords not in operator.reported_incidents:
             operator.reported_incidents.add(coords)
 
-            # Give volunteers 3 seconds to send their offers.
-            operator.pending_offers[coords] = {
-                "deadline": asyncio.get_running_loop().time() + 3,
-                "offers": []
-            }
+            if operator.volunteer_mode == VOLUNTEER_MODE_BIDDING:
+                # Give volunteers 3 seconds to send their offers.
+                operator.pending_offers[coords] = {
+                    "deadline": asyncio.get_running_loop().time() + 3,
+                    "offers": []
+                }
 
-            # Notify every volunteer currently on duty.
-            for volunteer in list(Volunteers):
-                if volunteer.on_duty:
-                    alert = Message(to=str(volunteer.jid))
-                    alert.set_metadata("performative", "inform")
-                    alert.body = f"HELP {x} {y}"
-                    await self.send(alert)
+                # Notify every volunteer currently on duty.
+                for volunteer in list(Volunteers):
+                    if volunteer.on_duty:
+                        alert = Message(to=str(volunteer.jid))
+                        alert.set_metadata("performative", "inform")
+                        alert.body = f"HELP {x} {y}"
+                        await self.send(alert)
+            else:
+                # No bidding: the operator directly assigns the closest
+                # available volunteer.
+                await self.assign_closest_volunteer(coords)
 
         dispatched = await self.dispatch_ambulance(coords)
 
@@ -973,12 +1156,84 @@ class Operator_Behav(CyclicBehaviour):
             reply.body = f"RECEIVED {x} {y}"
         await self.send(reply)
 
-    async def dispatch_ambulance(self, coords):
-        """Send the closest free ambulance to an incident.
+    async def assign_closest_volunteer(self, coords):
+        """Assign the closest available volunteer without waiting for offers."""
+        operator = self.agent
+        x, y = coords
 
-        Returns True if an ambulance is on its way to ``coords`` (either just
-        dispatched or already dispatched earlier).
+        closest = min(
+            (
+                volunteer for volunteer in Volunteers
+                if volunteer.on_duty and volunteer.can_respond()
+                and volunteer.x is not None and volunteer.y is not None
+                and abs(volunteer.x - x) + abs(volunteer.y - y)
+                <= volunteer.max_distance
+            ),
+            key=lambda volunteer: abs(volunteer.x - x) + abs(volunteer.y - y),
+            default=None,
+        )
+
+        if closest is None:
+            print(f"[Operator] No available volunteer for {coords}")
+            return False
+
+        assignment = Message(to=str(closest.jid))
+        assignment.set_metadata("performative", "inform")
+        assignment.body = f"ASSIGN {x} {y}"
+        await self.send(assignment)
+        print(f"[Operator] Assigned {coords} to {closest.jid} (no bidding)")
+        return True
+
+    async def dispatch_ambulance(self, coords):
+        """Send the best free ambulance to an incident.
+
+        In bidding mode the free ambulances are asked for an offer first.
+        Returns True if an ambulance is on its way (or bidding has started)
+        for ``coords``.
         """
+        operator = self.agent
+        x, y = coords
+
+        if coords in operator.handled_incidents:
+            return True
+        if coords in operator.dispatched_ambulances:
+            return True
+
+        busy = operator.busy_ambulances
+
+        if operator.ambulance_mode == AMBULANCE_MODE_BIDDING:
+            if coords in operator.pending_ambulance_offers:
+                return True
+
+            free = [
+                a for a in Ambulances
+                if a.x is not None and a.y is not None
+                and str(a.jid) not in busy
+            ]
+            if not free:
+                return False
+
+            victim = collapsed_victim_at(x, y)
+            severity = getattr(victim, "severity", 1) if victim is not None else 1
+            operator.pending_ambulance_offers[coords] = {
+                "deadline": asyncio.get_running_loop().time() + 3,
+                "offers": []
+            }
+            for ambulance in free:
+                bid = Message(to=str(ambulance.jid))
+                bid.set_metadata("performative", "inform")
+                bid.body = f"BID {x} {y} {severity}"
+                await self.send(bid)
+            print(
+                f"[Operator] Requested ambulance bids for {coords} "
+                f"(severity {severity})"
+            )
+            return True
+
+        return await self.dispatch_closest_ambulance(coords)
+
+    async def dispatch_closest_ambulance(self, coords):
+        """Assign the closest free ambulance directly (also used as fallback)."""
         operator = self.agent
         x, y = coords
 
@@ -999,15 +1254,20 @@ class Operator_Behav(CyclicBehaviour):
         if nearest is None:
             return False
 
-        jid = str(nearest.jid)
-        operator.dispatched_ambulances[coords] = jid
+        await self.alert_ambulance(nearest, x, y)
+        return True
+
+    async def alert_ambulance(self, ambulance, x, y):
+        """Tell one ambulance to respond to an incident and mark it busy."""
+        operator = self.agent
+        jid = str(ambulance.jid)
+        operator.dispatched_ambulances[(x, y)] = jid
         operator.busy_ambulances.add(jid)
         alert = Message(to=jid)
         alert.set_metadata("performative", "inform")
         alert.body = f"HELP {x} {y}"
         await self.send(alert)
-        print(f"[Operator] Dispatched ambulance {jid} to {coords}")
-        return True
+        print(f"[Operator] Dispatched ambulance {jid} to {(x, y)}")
 
     async def release_ambulance(self, jid):
         """Mark an ambulance as available again and rebalance incidents."""
@@ -1018,6 +1278,57 @@ class Operator_Behav(CyclicBehaviour):
                 del operator.dispatched_ambulances[coords]
         print(f"[Operator] Ambulance {jid} is available again")
         await self.rebalance_ambulances()
+
+    async def handle_reposition_request(self, msg, coords):
+        """Tell a free ambulance where to wait, away from the others."""
+        operator = self.agent
+        sender = next(
+            (a for a in Ambulances if str(a.jid) == str(msg.sender)), None
+        )
+        reply = msg.make_reply()
+        reply.set_metadata("performative", "inform")
+
+        if operator.ambulance_reposition != AMBULANCE_REPOSITION_ON or sender is None:
+            reply.body = "STAY"
+            await self.send(reply)
+            return
+
+        others = [
+            a for a in Ambulances
+            if a is not sender and a.x is not None and a.y is not None
+        ]
+        target = self.furthest_from_ambulances(others)
+        if target is None:
+            reply.body = "STAY"
+        else:
+            reply.body = f"POSITION {target[0]} {target[1]}"
+            print(
+                f"[Operator] Repositioning {sender.jid} from {coords} "
+                f"to {target}"
+            )
+        await self.send(reply)
+
+    @staticmethod
+    def furthest_from_ambulances(ambulances):
+        """Return the grid cell furthest from its nearest ambulance.
+
+        When several cells are equally far away, the first one found (top to
+        bottom, left to right) is used.
+        """
+        if not ambulances:
+            return None
+
+        best = None
+        best_distance = -1
+        for y in range(Environment_height):
+            for x in range(Environment_width):
+                nearest = min(
+                    abs(x - a.x) + abs(y - a.y) for a in ambulances
+                )
+                if nearest > best_distance:
+                    best_distance = nearest
+                    best = (x, y)
+        return best
 
     async def rebalance_ambulances(self):
         """Reassign incidents to closer ambulances that became free.
@@ -1094,8 +1405,11 @@ class Operator(Agent):
     async def setup(self):
         self.reported_incidents = set()
         self.pending_offers = {}
+        self.pending_ambulance_offers = {}
         self.dispatched_ambulances = {}
         self.busy_ambulances = set()
         self.handled_incidents = set()
         self.ambulance_mode = AMBULANCE_MODE_CLOSEST
+        self.volunteer_mode = VOLUNTEER_MODE_BIDDING
+        self.ambulance_reposition = AMBULANCE_REPOSITION_OFF
         self.add_behaviour(Operator_Behav())
