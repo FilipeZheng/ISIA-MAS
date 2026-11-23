@@ -16,7 +16,6 @@ from typing import Callable
 
 import spade
 
-import agents
 from agents import (
     AEDAgent,
     AMBULANCE_MODE_CLOSEST,
@@ -106,39 +105,10 @@ AED_PLACEMENTS0 = (
     AgentPlacement("aed", "aed0@localhost", 2, 3),
     AgentPlacement("aed", "aed1@localhost", 16, 6),
 )
-
-# Test scenario for volunteer BDI reasoning
-VOLUNTEER_BDI_PLACEMENTS = (
-    AgentPlacement("person", "patient_bdi@localhost", 8, 6),
-    AgentPlacement("person", "bystander_bdi@localhost", 8, 2),
-    AgentPlacement("volunteer", "volunteer0@localhost", 5, 6),
+VOLUNTEER_PLACEMENTS0 = (
+    AgentPlacement("volunteer", "volunteer0@localhost", 2, 3),
     AgentPlacement("volunteer", "volunteer1@localhost", 16, 6),
-    AgentPlacement("ambulance", "ambulance_bdi@localhost", 24, 14),
 )
-
-CITY_PEDESTRIANS = (
-    AgentPlacement("person", "pedestrian0@localhost", 2, 2),
-    AgentPlacement("person", "pedestrian1@localhost", 20, 2),
-    AgentPlacement("person", "pedestrian2@localhost", 3, 12),
-    AgentPlacement("person", "pedestrian3@localhost", 19, 11),
-    AgentPlacement("person", "pedestrian4@localhost", 11, 12),
-    AgentPlacement("person", "pedestrian5@localhost", 14, 1),
-)
-
-
-async def start_city_roaming(spawned):
-    jids = [placement.jid for placement in CITY_PEDESTRIANS]
-    jids += [
-        "bystander_bdi@localhost",
-        "volunteer0@localhost",
-        "volunteer1@localhost",
-    ]
-
-    for jid in jids:
-        agent = spawned.get(jid)
-
-        if agent is not None and agent.x is not None and not agent.collapsed:
-            await agent.move_randomly(1.4)
 
 
 MULTIPLE_COLLAPSE_PLACEMENT = (
@@ -156,110 +126,6 @@ MULTIPLE_COLLAPSE_PLACEMENT = (
 
 MULTIPLE_COLLAPSE_AED = (
     AgentPlacement("aed", "aed0@localhost", 0, 8),
-)
-
-# Two collapses that the ambulance-selection mode has to handle differently:
-# a severity-3 collapse (needs an AED) and a severity-1 collapse, with one
-# ambulance nearby (no AED) and one far away (carries an AED). The second
-# victim is an AED agent, which may also be drawn towards the first collapse
-# as a bystander before it goes down itself.
-DISPATCH_MODE_PLACEMENT = (
-    AgentPlacement("person", "agent0@localhost", 3, 5),
-    AgentPlacement("person", "bystander0@localhost", 3, 3),
-    AgentPlacement("aed", "agent1@localhost", 3, 6),
-    AgentPlacement("ambulance", "ambulance0@localhost", 0, 6),
-    AgentPlacement("ambulance", "ambulance1@localhost", 24, 14,
-                   has_aed=True),
-)
-
-BIG_COLLAPSE = (
-    # West
-    AgentPlacement("person", "agent0@localhost", 2, 2),
-    AgentPlacement("person", "agent1@localhost", 5, 14,
-                   target=(14, 14), walk_speed=2, has_citizen_sensor=True),
-    AgentPlacement("person", "agent2@localhost", 11, 3),
-    # Centre
-    AgentPlacement("person", "agent3@localhost", 17, 9),
-    AgentPlacement("person", "agent4@localhost", 13, 17,
-                   target=(24, 17), walk_speed=2.5, has_citizen_sensor=True),
-    AgentPlacement("person", "agent5@localhost", 21, 2,
-                   target=(21, 12), walk_speed=2),
-    # East
-    AgentPlacement("person", "agent6@localhost", 27, 9,
-                   has_citizen_sensor=True),
-    AgentPlacement("person", "agent7@localhost", 33, 3),
-    AgentPlacement("person", "agent8@localhost", 30, 16),
-    AgentPlacement("person", "agent9@localhost", 33, 11,
-                   target=(24, 11), walk_speed=2, has_citizen_sensor=True),
-    # Far corners (longest trips to the hospital)
-    AgentPlacement("person", "agent10@localhost", 36, 19,
-                   has_citizen_sensor=True),
-    AgentPlacement("person", "agent11@localhost", 36, 0,
-                   has_citizen_sensor=True),
-)
-
-BIG_BYSTANDERS = (
-    AgentPlacement("person", "bystander0@localhost", 0, 10,
-                   target=(36, 10), walk_speed=2.5),
-    AgentPlacement("person", "bystander1@localhost", 36, 12,
-                   target=(0, 12), walk_speed=2.5),
-    AgentPlacement("person", "bystander2@localhost", 18, 0,
-                   target=(18, 19), walk_speed=2),
-    AgentPlacement("person", "bystander3@localhost", 9, 19,
-                   target=(28, 5), walk_speed=3),
-    AgentPlacement("person", "bystander4@localhost", 25, 5),
-    AgentPlacement("person", "bystander5@localhost", 12, 10),
-)
-
-BIG_AED_AGENTS = (
-    AgentPlacement("aed", "aed0@localhost", 3, 3),     # NW
-    AgentPlacement("aed", "aed1@localhost", 14, 4),    # N-centre
-    AgentPlacement("aed", "aed2@localhost", 4, 15),    # SW
-    AgentPlacement("aed", "aed3@localhost", 22, 16),   # S-centre
-    AgentPlacement("aed", "aed4@localhost", 31, 9),    # East
-)
-
-BIG_AMBULANCES = (
-    AgentPlacement("ambulance", "ambulance0@localhost", 10, 6),            # W
-    AgentPlacement("ambulance", "ambulance1@localhost", 18, 13,
-                   has_aed=True),                                          # C
-    AgentPlacement("ambulance", "ambulance2@localhost", 30, 5),            # NE
-    AgentPlacement("ambulance", "ambulance3@localhost", 34, 17,
-                   has_aed=True),                                          # SE
-)
-
-BIG_ENVIRONMENT_PLACEMENT = (
-    BIG_COLLAPSE + BIG_BYSTANDERS + BIG_AED_AGENTS
-    + BIG_AMBULANCES
-)
-
-BIG_ENVIRONMENT_EVENTS = (
-    # --- Warm-up: single, easy collapses -----------------------------------
-    collapse_at(15,  "agent6@localhost"),                       # E, sensor
-    collapse_at(70,  "agent3@localhost", false_alarm=True),     # centre
-    collapse_at(130, "agent1@localhost"),                       # ~(14,14)
-
-    # --- AED wave: severity 3 --------------------------------------------
-    collapse_at(190, "agent0@localhost", severity=3),           # NW, aed0 close
-    collapse_at(250, "agent4@localhost"),                       # ~(24,17)
-    collapse_at(320, "agent9@localhost", severity=3),           # ~(24,11)
-
-    # --- Burst A: three zones at once, contention for ambulance3 ----------
-    collapse_at(400, "agent7@localhost", severity=3),           # NE
-    collapse_at(405, "agent10@localhost"),                      # SE corner
-    collapse_at(410, "agent5@localhost"),                       # ~(21,12)
-
-    # --- Shift change and false alarms ------------------------------------
-    collapse_at(520, "agent8@localhost", false_alarm=True),     # SE
-    collapse_at(580, "agent3@localhost", severity=3),           # second collapse
-
-    # --- Burst B: two severity-3 collapses far apart ----------------------
-    collapse_at(650, "agent2@localhost", severity=3),           # NW
-    collapse_at(655, "agent11@localhost", severity=3),          # NE corner
-
-    # --- Late collapses ----------------------------------------------------
-    collapse_at(780, "agent8@localhost"),                       # second collapse
-    collapse_at(900, "bystander4@localhost"),                   # last one
 )
 
 
@@ -289,8 +155,8 @@ SCENARIOS = {
         ),
     },
     "falseAlarmExample": {
-        "title": "False alarm example (with AED agents)",
-        "placements": AED_PLACEMENTS0 + DEFAULT_PLACEMENTS + AMBULANCE_PLACEMENT1,
+        "title": "False alarm example (with volunteer agents)",
+        "placements": VOLUNTEER_PLACEMENTS0 + DEFAULT_PLACEMENTS + AMBULANCE_PLACEMENT1,
         "events": (
             collapse_at(5, "agent0@localhost", false_alarm=True),
         ),
@@ -311,41 +177,6 @@ SCENARIOS = {
             collapse_at(0, "agent1@localhost", false_alarm=False)
         ),
     },
-    
-    "volunteerBDI": {
-        "title": "Volunteer BDI Response (two volunteers)",
-        "placements": VOLUNTEER_BDI_PLACEMENTS,
-        "events": (
-            collapse_at(5, "patient_bdi@localhost"),
-        ),
-    },
-    
-    "livingCityBDI": {
-        "title": "Living City: roaming pedestrians and BDI volunteers",
-        "placements": VOLUNTEER_BDI_PLACEMENTS + CITY_PEDESTRIANS,
-        "events": (
-            ScenarioEvent(
-                0,
-                start_city_roaming,
-                "Pedestrians and volunteers begin roaming"
-            ),
-            collapse_at(10, "patient_bdi@localhost"),
-        ),
-    },
-
-    "dispatchModes": {
-        "title": "Ambulance dispatch modes (closest / reassign / bidding)",
-        "placements": DISPATCH_MODE_PLACEMENT,
-        "events": (
-            collapse_at(5, "agent0@localhost", severity=3),
-            collapse_at(7, "agent1@localhost", severity=1),
-        ),
-    },
-    "BigEnvironment": {
-        "title": "Big environment to see all the agents implemented working",
-        "placements": BIG_ENVIRONMENT_PLACEMENT,
-        "events": BIG_ENVIRONMENT_EVENTS,
-    },
 }
 
 simulation_running = False
@@ -357,23 +188,6 @@ current_volunteer_mode = VOLUNTEER_MODE_BIDDING
 current_ambulance_reposition = AMBULANCE_REPOSITION_OFF
 operator = None
 
-DEFAULT_GRID = (25, 15)                      # (width, height)
-SCENARIO_GRIDS = {"BigEnvironment": (37, 20)}
-
-
-def scenario_grid(name):
-    """Return (width, height) of the grid a scenario needs."""
-    return SCENARIO_GRIDS.get(name, DEFAULT_GRID)
-
-
-def resize_environment(width, height):
-    """Resize the shared grid IN PLACE so every imported reference stays valid."""
-    agents.Environment_width = width
-    agents.Environment_height = height
-    agents.Environment[:] = [[set() for _ in range(width)] for _ in range(height)]
-
-
-resize_environment(*DEFAULT_GRID)
 
 def ambulance_mode_names():
     """Return the available ambulance selection modes."""
@@ -435,7 +249,6 @@ def reset_environment():
     Hospital_coords.clear()
     Ambulances.clear()
     Volunteers.clear()
-    agents.AEDagents.clear()
 
 
 def _create_agent(placement):
@@ -454,12 +267,9 @@ def _create_agent(placement):
             ),
         )
     elif placement.kind == "volunteer":
-        agent = VolunteerAgent(
-            placement.jid, "password",
-            status="AVAILABLE",
-            training="basic",
-            has_firstAid=True,
-            bidding=current_volunteer_mode == VOLUNTEER_MODE_BIDDING,
+        return VolunteerAgent(
+            placement.jid, "password", status="AVAILABLE",
+            training="basic", has_firstAid=True,
         )
     else:
         raise ValueError(f"Unknown agent kind: {placement.kind}")
@@ -550,6 +360,7 @@ async def run_simulation(name):
     finally:
         simulation_running = False
 
+
 def start_simulation(name="default", ambulance_mode=AMBULANCE_MODE_CLOSEST,
                      volunteer_mode=VOLUNTEER_MODE_BIDDING,
                      ambulance_reposition=AMBULANCE_REPOSITION_OFF):
@@ -559,12 +370,8 @@ def start_simulation(name="default", ambulance_mode=AMBULANCE_MODE_CLOSEST,
     global current_ambulance_reposition
     if name not in SCENARIOS:
         raise ValueError(f"Unknown scenario: {name}")
-
     if simulation_running:
         return False
-
-    resize_environment(*scenario_grid(name))
-
     if ambulance_mode not in AMBULANCE_MODES:
         ambulance_mode = AMBULANCE_MODE_CLOSEST
     if volunteer_mode not in VOLUNTEER_MODES:
@@ -607,7 +414,6 @@ async def stop_simulation():
     simulation_agents = []
 
     reset_environment()
-    resize_environment(*DEFAULT_GRID)
     current_ambulance_mode = AMBULANCE_MODE_CLOSEST
     current_volunteer_mode = VOLUNTEER_MODE_BIDDING
     current_ambulance_reposition = AMBULANCE_REPOSITION_OFF
