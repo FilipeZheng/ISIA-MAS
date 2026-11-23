@@ -20,6 +20,7 @@ from agents import (
     AEDAgent,
     AMBULANCE_MODE_CLOSEST,
     AMBULANCE_MODES,
+    AMBULANCE_REPOSITION_CORNERS,
     AMBULANCE_REPOSITION_MODES,
     AMBULANCE_REPOSITION_OFF,
     AMBULANCE_REPOSITION_ON,
@@ -276,7 +277,10 @@ def _create_agent(placement):
         agent = EmergencyAmbulance(
             placement.jid, "password",
             has_aed=placement.has_aed,
-            reposition=current_ambulance_reposition == AMBULANCE_REPOSITION_ON,
+            reposition=(
+                current_ambulance_reposition
+                in (AMBULANCE_REPOSITION_ON, AMBULANCE_REPOSITION_CORNERS)
+            ),
         )
     else:
         raise ValueError(f"Unknown agent kind: {placement.kind}")
@@ -299,7 +303,13 @@ async def setup_scenario(name="default"):
         await agent.insert(placement.x, placement.y)
         if placement.target is not None:
             await agent.move_to(*placement.target, placement.walk_speed)
-        await agent.start(auto_register=True)
+
+    # Start the agents together: the XMPP connection of each agent is the
+    # slow part and it is independent for every agent, so waiting for the
+    # agents one by one makes loading a scenario needlessly slow.
+    await asyncio.gather(
+        *(agent.start(auto_register=True) for agent in simulation_agents)
+    )
 
     Hospital(*HOSPITAL_POSITION)
     return spawned

@@ -270,14 +270,22 @@ def _volunteer_mode_button(selected, volunteer_mode, ambulance_mode,
 
 def _ambulance_reposition_button(selected, ambulance_mode, volunteer_mode,
                                  ambulance_reposition):
-    """Return the button that toggles ambulance repositioning."""
-    enabled = ambulance_reposition == agents.AMBULANCE_REPOSITION_ON
-    next_mode = (
-        agents.AMBULANCE_REPOSITION_OFF if enabled
-        else agents.AMBULANCE_REPOSITION_ON
-    )
-    state = "on" if enabled else "off"
-    action = "turn off" if enabled else "turn on"
+    """Return the button that cycles the ambulance repositioning mode."""
+    modes = list(agents.AMBULANCE_REPOSITION_MODES)
+    if ambulance_reposition not in modes:
+        ambulance_reposition = agents.AMBULANCE_REPOSITION_OFF
+    idx = modes.index(ambulance_reposition)
+    next_mode = modes[(idx + 1) % len(modes)]
+    state = {
+        agents.AMBULANCE_REPOSITION_OFF: "off",
+        agents.AMBULANCE_REPOSITION_ON: "on",
+        agents.AMBULANCE_REPOSITION_CORNERS: "corners",
+    }[ambulance_reposition]
+    action = {
+        agents.AMBULANCE_REPOSITION_OFF: "turn on",
+        agents.AMBULANCE_REPOSITION_ON: "turn to corners",
+        agents.AMBULANCE_REPOSITION_CORNERS: "turn off",
+    }[ambulance_reposition]
     hidden = _hidden_inputs(
         selected,
         ambulance_mode=ambulance_mode,
@@ -287,7 +295,7 @@ def _ambulance_reposition_button(selected, ambulance_mode, volunteer_mode,
         "ambulance_reposition",
         next_mode,
         f"Ambulance repositioning: {state} ({action})",
-        enabled,
+        ambulance_reposition != agents.AMBULANCE_REPOSITION_OFF,
         hidden,
     )
 

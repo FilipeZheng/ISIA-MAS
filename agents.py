@@ -32,10 +32,15 @@ diry = [1,0,-1,0,0]
 AMBULANCE_MODE_CLOSEST = "closest"
 AMBULANCE_MODE_REASSIGN = "reassign"
 AMBULANCE_MODE_BIDDING = "bidding"
+AMBULANCE_MODE_REASSIGN_BIDDING = "reassign_bidding"
 AMBULANCE_MODES = {
     AMBULANCE_MODE_CLOSEST: "Closest free ambulance (default)",
     AMBULANCE_MODE_REASSIGN: "Reassign if a closer ambulance becomes free",
     AMBULANCE_MODE_BIDDING: "Bidding (ambulances offer, best value wins)",
+    AMBULANCE_MODE_REASSIGN_BIDDING: (
+        "Reassign + bidding (bidding on collapse; redo bidding when an "
+        "ambulance becomes available)"
+    ),
 }
 
 # Extra bid value for an ambulance that carries an AED.
@@ -54,9 +59,11 @@ VOLUNTEER_MODES = {
 # Whether a free ambulance repositions itself before going idle again.
 AMBULANCE_REPOSITION_OFF = "off"
 AMBULANCE_REPOSITION_ON = "on"
+AMBULANCE_REPOSITION_CORNERS = "corners"
 AMBULANCE_REPOSITION_MODES = {
     AMBULANCE_REPOSITION_OFF: "Off (stay where it is)",
     AMBULANCE_REPOSITION_ON: "On (move to the spot furthest from other ambulances)",
+    AMBULANCE_REPOSITION_CORNERS: "Corners (move to the spot furthest from other ambulances and corners)",
 }
 
 # A collapse of this severity needs an AED, unless the responder carries one.
@@ -1236,17 +1243,66 @@ class Operator_Behav(CyclicBehaviour):
             if offers:
                 value, ambulance_jid = max(offers)
 
-                assignment = Message(to=ambulance_jid)
-                assignment.set_metadata("performative", "inform")
-                assignment.body = f"ASSIGN {coords[0]} {coords[1]}"
-                await self.send(assignment)
+                # "Reassign + bidding": when the bidding round re-opens an
+                # incident that already has an assignment on its way,
+                # switch to the winning free ambulance only when it is
+                # clearly closer ("reassign if a closer option exists");
+                # otherwise keep the assignment.
+                skip_assignment = False
+                if operator.ambulance_mode == AMBULANCE_MODE_REASSIGN_BIDDING:
+                    previous_jid = operator.dispatched_ambulances.get(coords)
+                    previous = (
+                        next((a for a in Ambulances
+                              if str(a.jid) == previous_jid), None)
+                        if previous_jid is not None else None
+                    )
+                    winner = next(
+                        (a for a in Ambulances
+                         if str(a.jid) == ambulance_jid), None
+                    )
+                    if (previous is not None
+                            and previous.x is not None
+                            and previous.y is not None):
+                        previous_dist = (
+                            abs(previous.x - coords[0])
+                            + abs(previous.y - coords[1])
+                        )
+                        winner_dist = None
+                        if (winner is not None
+                                and winner.x is not None
+                                and winner.y is not None):
+                            winner_dist = (
+                                abs(winner.x - coords[0])
+                                + abs(winner.y - coords[1])
+                            )
+                        if winner_dist is not None and winner_dist < previous_dist:
+                            # A clearly closer free option exists: reassign.
+                            operator.busy_ambulances.discard(previous_jid)
+                            cancel = Message(to=previous_jid)
+                            cancel.set_metadata("performative", "inform")
+                            cancel.body = f"CANCEL {coords[0]} {coords[1]}"
+                            await self.send(cancel)
+                            print(
+                                f"[Operator] Reassigned {coords} to closer "
+                                f"ambulance {ambulance_jid}"
+                            )
+                        else:
+                            # The assignment on its way is closer or equal:
+                            # keep it.
+                            skip_assignment = True
 
-                operator.dispatched_ambulances[coords] = ambulance_jid
-                operator.busy_ambulances.add(ambulance_jid)
-                print(
-                    f"[Operator] Assigned {coords} to {ambulance_jid} "
-                    f"with bid {value}"
-                )
+                if not skip_assignment:
+                    assignment = Message(to=ambulance_jid)
+                    assignment.set_metadata("performative", "inform")
+                    assignment.body = f"ASSIGN {coords[0]} {coords[1]}"
+                    await self.send(assignment)
+
+                    operator.dispatched_ambulances[coords] = ambulance_jid
+                    operator.busy_ambulances.add(ambulance_jid)
+                    print(
+                        f"[Operator] Assigned {coords} to {ambulance_jid} "
+                        f"with bid {value}"
+                    )
             else:
                 print(f"[Operator] No ambulance bid for {coords}")
                 await self.dispatch_closest_ambulance(coords)
@@ -1428,7 +1484,10 @@ class Operator_Behav(CyclicBehaviour):
 
         busy = operator.busy_ambulances
 
-        if operator.ambulance_mode == AMBULANCE_MODE_BIDDING:
+        if operator.ambulance_mode in (
+            AMBULANCE_MODE_BIDDING,
+            AMBULANCE_MODE_REASSIGN_BIDDING,
+        ):
             if coords in operator.pending_ambulance_offers:
                 return True
 
@@ -1504,7 +1563,52 @@ class Operator_Behav(CyclicBehaviour):
             if assigned == jid:
                 del operator.dispatched_ambulances[coords]
         print(f"[Operator] Ambulance {jid} is available again")
-        await self.rebalance_ambulances()
+        if operator.ambulance_mode == AMBULANCE_MODE_REASSIGN_BIDDING:
+            await self.redo_bidding()
+        else:
+            await self.rebalance_ambulances()
+
+    async def redo_bidding(self):
+        """Redo a bidding round for the outstanding incidents.
+
+        Used by the "reassign + bidding" mode: when an ambulance becomes
+        available, every incident that still needs help is put back into
+        a bidding round so the freed option is reconsidered; the bidding
+        itself then decides between the free ambulances (see the ASSIGN
+        handling in Operator_Behav.run).
+        """
+        operator = self.agent
+        free = [
+            a for a in Ambulances
+            if a.x is not None and a.y is not None
+            and str(a.jid) not in operator.busy_ambulances
+        ]
+        if not free:
+            return
+
+        for coords in sorted(operator.reported_incidents):
+            if coords in operator.handled_incidents:
+                continue
+            if not within_E(coords[0], coords[1]):
+                continue
+            victim = collapsed_victim_at(coords[0], coords[1])
+            if victim is None:
+                continue
+            severity = getattr(victim, "severity", 1)
+
+            operator.pending_ambulance_offers[coords] = {
+                "deadline": asyncio.get_running_loop().time() + 3,
+                "offers": []
+            }
+            for ambulance in free:
+                bid = Message(to=str(ambulance.jid))
+                bid.set_metadata("performative", "inform")
+                bid.body = f"BID {coords[0]} {coords[1]} {severity}"
+                await self.send(bid)
+            print(
+                f"[Operator] Redid a bidding for {coords} "
+                f"(an ambulance became available)"
+            )
 
     async def handle_reposition_request(self, msg, coords):
         """Tell a free ambulance where to wait, away from the others."""
@@ -1515,7 +1619,9 @@ class Operator_Behav(CyclicBehaviour):
         reply = msg.make_reply()
         reply.set_metadata("performative", "inform")
 
-        if operator.ambulance_reposition != AMBULANCE_REPOSITION_ON or sender is None:
+        if (operator.ambulance_reposition not in (
+                AMBULANCE_REPOSITION_ON, AMBULANCE_REPOSITION_CORNERS)
+                or sender is None):
             reply.body = "STAY"
             await self.send(reply)
             return
@@ -1524,7 +1630,10 @@ class Operator_Behav(CyclicBehaviour):
             a for a in Ambulances
             if a is not sender and a.x is not None and a.y is not None
         ]
-        target = self.furthest_from_ambulances(others)
+        if operator.ambulance_reposition == AMBULANCE_REPOSITION_CORNERS:
+            target = self.furthest_from_ambulances_and_corners(others)
+        else:
+            target = self.furthest_from_ambulances(others)
         if target is None:
             reply.body = "STAY"
         else:
@@ -1552,6 +1661,39 @@ class Operator_Behav(CyclicBehaviour):
                 nearest = min( # Evaluate distance from other ambulances as well as distance from walls
                     min(abs(x - a.x) + abs(y - a.y), x, y, Environment_height-y, Environment_width-x) for a in ambulances
                 )
+                if nearest > best_distance:
+                    best_distance = nearest
+                    best = (x, y)
+        return best
+
+    @staticmethod
+    def furthest_from_ambulances_and_corners(ambulances):
+        """Return the grid cell furthest from other ambulances and corners.
+
+        A cell's distance to a group is its distance to the nearest member
+        of the group; the chosen cell maximises the smallest of the
+        distances from the other ambulances and the four corners of the
+        environment grid. When several cells are equally far away, the
+        first one found (top to bottom, left to right) is used.
+        """
+        corners = (
+            (0, 0),
+            (0, Environment_height - 1),
+            (Environment_width - 1, 0),
+            (Environment_width - 1, Environment_height - 1),
+        )
+
+        best = None
+        best_distance = -1
+        for y in range(Environment_height):
+            for x in range(Environment_width):
+                distances = [
+                    abs(x - cx) + abs(y - cy) for cx, cy in corners
+                ]
+                distances.extend(
+                    abs(x - a.x) + abs(y - a.y) for a in ambulances
+                )
+                nearest = min(distances)
                 if nearest > best_distance:
                     best_distance = nearest
                     best = (x, y)
