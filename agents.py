@@ -325,6 +325,10 @@ class ByStand(CyclicBehaviour):
         if getattr(agent, "diverted", False):
             return
         agent.diverted = True
+        agent.resume_random_walk = (
+            isinstance(agent.walk_behaviour, RandomWalk)
+            and not agent.walk_behaviour.is_killed()
+        )
         if (agent.target_x is not None and agent.target_y is not None
                 and (agent.target_x, agent.target_y) != (agent.x, agent.y)):
             # Resume the walk the agent was already doing.
@@ -341,7 +345,14 @@ class ByStand(CyclicBehaviour):
             return
         agent.diverted = False
         target, agent.resume_target = getattr(agent, "resume_target", None), None
-        if target is not None:
+
+        if getattr(agent, "resume_random_walk", False):
+            agent.resume_random_walk = False
+            if agent.x is not None and not agent.collapsed:
+                await agent.move_randomly(agent.walk_speed)
+            return
+        
+        if target is not None and agent.x is not None and not agent.collapsed:
             await agent.move_to(*target)
 
 class CitSensor(CyclicBehaviour):
@@ -915,6 +926,15 @@ class VolunteerFSM(FSMBehaviour):
                 self.set_next_state("OFF_DUTY")
                 return
 
+            if (
+                volunteer.resume_patrol
+                and (
+                    volunteer.walk_behaviour is None
+                    or volunteer.walk_behaviour.is_killed()
+                )
+            ):
+                await volunteer.move_randomly(1.4)
+
             msg = await self.receive(timeout=0.25)
             if msg:
                 parts = msg.body.split()
@@ -1065,6 +1085,7 @@ class VolunteerAgent(BDIAgent, WalkingAgent):
         self.offered = set()
         self.known_incidents = {}
         self.patient_confirmed = False
+        self.resume_patrol = False
 
         if self.on_duty:
             self.bdi.set_belief("on_duty")
@@ -1159,6 +1180,7 @@ class VolunteerAgent(BDIAgent, WalkingAgent):
 
         self.current_assign = None
         self.patient_confirmed = False
+        self.resume_patrol = True
 
     async def insert(self, x, y):
         # Do not attach the default ByStand behaviour to a volunteer.
