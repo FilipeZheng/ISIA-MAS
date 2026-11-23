@@ -373,30 +373,117 @@ class CitSensor(CyclicBehaviour):
         msg.body = f"COLLAPSE {x} {y}"
         await self.send(msg)
 
-class AEDBehav(CyclicBehaviour):
-    async def run(self):
-        agent = self.agent
-        msg = await self.receive(timeout=10)
-        if msg:
-            msg_type,*body = msg.body.split()
-            if msg_type=="AED":
-                reply = msg.make_reply() # inform availability
-                reply.body = "RECEIVED" if agent.available else "NOT_AVAILABLE"
-                await self.send(reply)
-            if agent.available:
-                bx, by = agent.base_x, agent.base_y
-                tx, ty = body
-                agent.available=False # become unavailable
-                await agent.move_to(tx,ty,9) # move to the location needed
-                while not agent.walk_behaviour.is_killed():
-                    await asyncio.sleep(0.5)
+AED_IDLE = "IDLE"
+AED_MOVING = "MOVING"
+AED_DELIVERING = "DELIVERING"
+AED_HELPING = "HELPING"
+AED_RETURNING = "RETURNING"
 
-                # add behaviour when colapse details are added
 
-                agent.available=True # become available
-                await agent.move_to(bx,by,7) # move to the base location
-                while not agent.walk_behaviour.is_killed():
-                   await asyncio.sleep(0.5)
+class AEDBehav(FSMBehaviour):
+    async def on_start(self):
+        self.agent.available = True
+
+    class Idle(State):
+        async def run(self):
+            agent = self.agent
+            msg = await self.receive(timeout=1)
+            if msg is not None:
+                parts = msg.body.split()
+                if parts[0]=="AED":
+                    x, y= int(parts[1]), int(parts[2])
+                    agent.available=False
+                    agent.current_target=(x, y)
+                    self.set_next_state(AED_MOVING)
+                    return
+            self.set_next_state(AED_IDLE)
+
+    class Moving(State):
+        async def run(self):
+            agent = self.agent
+            tx, ty = agent.current_target
+            await agent.move_to(tx, ty, 0.5)
+
+            while not agent.walk_behaviour.is_killed():
+                msg = await self.receive(timeout=0.5)
+                if msg is not None:
+                    parts=msg.body.split()
+                    if parts[0]=="CANCEL":
+                        x, y = int(parts[1]), int(parts[2])
+                        if agent.current_target==(x,y):
+                            agent.walk_behaviour.kill()
+                            print(f"[{agent.jid}] Response to ({tx}, {ty}) cancelled")
+                            agent.current_target = None
+                            self.set_next_state(AED_RETURNING)
+                            return
+
+            self.set_next_state(AED_DELIVERING)
+
+    class Delivering(State):
+        async def run(self):
+            agent = self.agent
+            x, y = agent.current_target
+
+            patient = None
+            if await agent.on_xy(x, y):
+                patient = next((o for o in Environment[y][x].copy()
+                                if o is not agent
+                                and isinstance(o, WalkingAgent)
+                                and o.collapsed), None)
+
+            report = Message(to="operator@localhost")
+            report.set_metadata("performative", "inform")
+            if patient is not None:
+                report.body = f"AED_DELIVERED {x} {y}"
+                print(f"[{agent.jid}] AED delivered at ({x}, {y})")
+                await self.send(report)
+                self.set_next_state(AED_HELPING)
+                return
+            else:
+                report.body = f"AED_NO_PATIENT {x} {y}"
+                print(f"[{agent.jid}] No collapsed patient at ({x}, {y})")
+            await self.send(report)
+
+            agent.current_target = None
+            self.set_next_state(AED_RETURNING)
+
+    class Helping(State):
+        async def run(self):
+            agent=self.agent
+            msg = await self.receive(timeout=1)
+            if msg is not None:
+                parts = msg.body.split()
+                if parts[0]=="DONE":
+                    self.set_next_state(AED_RETURNING)
+                    return
+                if parts[0]=="CANCEL":
+                    x, y = int(parts[1]), int(parts[2])
+                    if agent.current_target==(x,y):
+                        self.set_next_state(AED_RETURNING)
+                        return
+            self.set_next_state(AED_HELPING)
+
+    class Returning(State):
+        async def run(self):
+            agent = self.agent
+            # Available again as soon as it heads home, and listens for new
+            # requests during the trip instead of blocking.
+            agent.available = True
+            await agent.move_to(agent.base_x, agent.base_y, 0.5)
+
+            while not agent.walk_behaviour.is_killed():
+                msg = await self.receive(timeout=0.5)
+                if msg is not None:
+                    parts=msg.body.split()
+                    if parts[0]=="AED":
+                        x, y = int(parts[1]), int(parts[2])
+                        agent.walk_behaviour.kill()
+                        agent.available = False
+                        agent.current_target = (x,y)
+                        self.set_next_state(AED_MOVING)
+                        return
+
+            self.set_next_state(AED_IDLE)
 
 class WalkingAgent(Agent):
     x=None
@@ -658,6 +745,7 @@ class Helping(State):
                 report.body = f"FALSE_ALARM {agent.x} {agent.y}"
                 await self.send(report)
                 continue
+
             await i.remove()
             agent.agents_on_board.add(i)
             picked_up = True
@@ -754,6 +842,8 @@ class EmergencyAmbulance(WalkingAgent):
             self.behav = behav
             self.add_behaviour(self.behav)
 
+AEDagents = set()
+
 class AEDAgent(WalkingAgent):
 
     #attribute definitions
@@ -761,13 +851,15 @@ class AEDAgent(WalkingAgent):
     base_x = None
     base_y = None
     available = False
+    current_target = None
     #add other things to put in this
 
 
     async def setup(self):
         pass
     async def insert(self,x,y):     #This is only supposed to be used when placing the agents in the environment
-        global Environment
+        global Environment, AED
+        AEDagents.add(self)
         if self.x is not None:
             Environment[self.y][self.x].remove(self)
         self.base_x=x
@@ -777,8 +869,27 @@ class AEDAgent(WalkingAgent):
         self.available=True
         Environment[y][x].add(self)
         if self.behav==None:
-            self.add_behaviour(AEDBehav())
+            if self.behav is None:
+                b = AEDBehav()
+                b.add_state(name=AED_IDLE, state=AEDBehav.Idle(), initial=True)
+                b.add_state(name=AED_MOVING, state=AEDBehav.Moving())
+                b.add_state(name=AED_DELIVERING, state=AEDBehav.Delivering())
+                b.add_state(name=AED_HELPING, state=AEDBehav.Helping())
+                b.add_state(name=AED_RETURNING, state=AEDBehav.Returning())
 
+                b.add_transition(source=AED_IDLE, dest=AED_IDLE)
+                b.add_transition(source=AED_IDLE, dest=AED_MOVING)
+                b.add_transition(source=AED_MOVING, dest=AED_DELIVERING)
+                b.add_transition(source=AED_MOVING, dest=AED_RETURNING)
+                b.add_transition(source=AED_DELIVERING, dest=AED_HELPING)
+                b.add_transition(source=AED_DELIVERING, dest=AED_RETURNING)
+                b.add_transition(source=AED_HELPING, dest=AED_HELPING)
+                b.add_transition(source=AED_HELPING, dest=AED_RETURNING)
+                b.add_transition(source=AED_RETURNING, dest=AED_IDLE)
+                b.add_transition(source=AED_RETURNING, dest=AED_MOVING)
+
+                self.behav = b
+                self.add_behaviour(self.behav)
 
 
 
@@ -894,6 +1005,13 @@ class VolunteerFSM(FSMBehaviour):
             report.set_metadata("performative", "inform")
             report.body = f"CONFIRMED {x} {y}"
             await self.send(report)
+
+            if getattr(patient, "severity", 1) >= AED_REQUIRED_SEVERITY:
+                AED_request=Message(to="operator@localhost")
+                AED_request.set_metadata("performative", "inform")
+                AED_request.body = f"NEED_AED {x} {y}"
+                await self.send(AED_request)
+
 
             if volunteer.has_firstAid:
                 patient.receiving_first_aid = True  # Simulated intervention only
@@ -1213,6 +1331,13 @@ class Operator_Behav(CyclicBehaviour):
                 return
             await self.handle_reposition_request(msg, (x, y))
 
+        elif len(parts) == 3 and parts[0] == "NEED_AED":
+            try:
+                x, y = map(int, parts[1:])
+            except ValueError:
+                return
+            await self.dispatch_closest_aed(msg, (x, y))
+
     async def handle_collapse(self, msg, parts):
         operator = self.agent
         try:
@@ -1503,6 +1628,38 @@ class Operator_Behav(CyclicBehaviour):
                 f"to closer ambulance {best.jid}"
             )
 
+    async def dispatch_closest_aed(self, coords):
+        operator=self.agent
+        if not self.aed_needed(coords):
+            return
+        x, y = coords
+        ambulance_jid = operator.dispatched_ambulances[coords]
+        ambulance_dist=-1
+        for a in Ambulances:
+            if a.jid == ambulance_jid:
+                ambulance_dist=abs(a.x-x)+abs(a.y-y)
+        nearest_AED = min(
+                    (a for a in AEDagents
+                     if a.x is not None and a.y is not None and a.available),
+                    key=lambda a: abs(a.x - x) + abs(a.y - y),
+                    default=None
+                )
+        nearest_AED_dist=abs(nearest_AED.x-x) + abs(nearest_AED.y-y)
+        if nearest_AED_dist>ambulance_dist and ambulance_dist>=0:
+            return 
+        msg=Message(to=str(nearest_AED.jid))
+        msg.set_metadata("performative", "inform")
+        msg.body=f"AED {x} {y}"
+        await self.send(msg)
+
+    async def aed_needed(self, coords):
+        operator = self.agent
+        ambulance_jid = operator.dispatched_ambulances[coords]
+        for a in Ambulances:
+            if a.jid == ambulance_jid and a.has_aed:
+                return False
+        return True
+
 class Operator(Agent):
     async def setup(self):
         self.reported_incidents = set()
@@ -1514,4 +1671,4 @@ class Operator(Agent):
         self.ambulance_mode = AMBULANCE_MODE_CLOSEST
         self.volunteer_mode = VOLUNTEER_MODE_BIDDING
         self.ambulance_reposition = AMBULANCE_REPOSITION_OFF
-        self.add_behaviour(Operator_Behav())
+        self.add_behaviour(Operator_Behav())    
