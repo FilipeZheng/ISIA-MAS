@@ -133,7 +133,7 @@ def _describe_cell(cell):
 
 def _preview_layout(name):
     """Return the grid of (label, css class, tooltip) for a scenario preview."""
-    width, height = agents.Environment_width, agents.Environment_height
+    width, height = scenarios.scenario_grid(name)
     occupants = [[[] for _ in range(width)] for _ in range(height)]
 
     for placement in scenarios.scenario_placements(name):
@@ -419,7 +419,10 @@ def _metrics_html():
 def render_environment_html(preview=None, ambulance_mode=None, volunteer_mode=None,
                             ambulance_reposition=None):
     """Build the HTML page showing the live environment or a scenario preview."""
-    width, height = agents.Environment_width, agents.Environment_height
+    if preview is not None and not scenarios.simulation_running:
+        width, height = scenarios.scenario_grid(preview)
+    else:
+        width, height = agents.Environment_width, agents.Environment_height
     if ambulance_mode not in agents.AMBULANCE_MODES:
         ambulance_mode = scenarios.current_ambulance_mode
     if volunteer_mode not in agents.VOLUNTEER_MODES:
