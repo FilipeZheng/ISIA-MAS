@@ -667,7 +667,6 @@ class In_H(State):
         self.set_next_state(idling)
 
 class EmergencyAmbulance(WalkingAgent):
-    #Not finished yet
     can_identify_collapse = True
 
     #attribute definitions
@@ -695,7 +694,6 @@ class EmergencyAmbulance(WalkingAgent):
         elif severity >= AED_REQUIRED_SEVERITY:
             value -= AED_MISSING_PENALTY
         return value
-    #add other things to put in this
 
 
     async def setup(self):
