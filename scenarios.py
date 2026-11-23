@@ -435,6 +435,7 @@ def reset_environment():
     Hospital_coords.clear()
     Ambulances.clear()
     Volunteers.clear()
+    agents.AEDagents.clear()
 
 
 def _create_agent(placement):
