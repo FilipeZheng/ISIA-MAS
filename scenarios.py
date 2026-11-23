@@ -109,7 +109,7 @@ AED_PLACEMENTS0 = (
 # Test scenario for volunteer BDI reasoning
 VOLUNTEER_BDI_PLACEMENTS = (
     AgentPlacement("person", "patient_bdi@localhost", 8, 6),
-    AgentPlacement("person", "bystander_bdi@localhost", 8, 5),
+    AgentPlacement("person", "bystander_bdi@localhost", 8, 2),
     AgentPlacement("volunteer", "volunteer0@localhost", 5, 6),
     AgentPlacement("volunteer", "volunteer1@localhost", 16, 6),
     AgentPlacement("ambulance", "ambulance_bdi@localhost", 24, 14),
