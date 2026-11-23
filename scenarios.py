@@ -115,6 +115,31 @@ VOLUNTEER_BDI_PLACEMENTS = (
     AgentPlacement("ambulance", "ambulance_bdi@localhost", 24, 14),
 )
 
+CITY_PEDESTRIANS = (
+    AgentPlacement("person", "pedestrian0@localhost", 2, 2),
+    AgentPlacement("person", "pedestrian1@localhost", 20, 2),
+    AgentPlacement("person", "pedestrian2@localhost", 3, 12),
+    AgentPlacement("person", "pedestrian3@localhost", 19, 11),
+    AgentPlacement("person", "pedestrian4@localhost", 11, 12),
+    AgentPlacement("person", "pedestrian5@localhost", 14, 1),
+)
+
+
+async def start_city_roaming(spawned):
+    jids = [placement.jid for placement in CITY_PEDESTRIANS]
+    jids += [
+        "bystander_bdi@localhost",
+        "volunteer0@localhost",
+        "volunteer1@localhost",
+    ]
+
+    for jid in jids:
+        agent = spawned.get(jid)
+
+        if agent is not None and agent.x is not None and not agent.collapsed:
+            await agent.move_randomly(1.4)
+
+
 MULTIPLE_COLLAPSE_PLACEMENT = (
     AgentPlacement("person", "agent0@localhost", 5, 5,
                    walk_speed=2),
@@ -202,6 +227,20 @@ SCENARIOS = {
             collapse_at(5, "patient_bdi@localhost"),
         ),
     },
+    
+    "livingCityBDI": {
+        "title": "Living City: roaming pedestrians and BDI volunteers",
+        "placements": VOLUNTEER_BDI_PLACEMENTS + CITY_PEDESTRIANS,
+        "events": (
+            ScenarioEvent(
+                0,
+                start_city_roaming,
+                "Pedestrians and volunteers begin roaming"
+            ),
+            collapse_at(10, "patient_bdi@localhost"),
+        ),
+    },
+
     "dispatchModes": {
         "title": "Ambulance dispatch modes (closest / reassign / bidding)",
         "placements": DISPATCH_MODE_PLACEMENT,
