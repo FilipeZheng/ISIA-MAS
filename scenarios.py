@@ -452,6 +452,14 @@ def _create_agent(placement):
                 in (AMBULANCE_REPOSITION_ON, AMBULANCE_REPOSITION_CORNERS)
             ),
         )
+    elif placement.kind == "volunteer":
+        agent = VolunteerAgent(
+            placement.jid, "password",
+            status="AVAILABLE",
+            training="basic",
+            has_firstAid=True,
+            bidding=current_volunteer_mode == VOLUNTEER_MODE_BIDDING,
+        )
     else:
         raise ValueError(f"Unknown agent kind: {placement.kind}")
     agent.has_citizen_sensor = placement.has_citizen_sensor
