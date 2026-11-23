@@ -12,9 +12,12 @@ import asyncio
 import random
 
 from spade.agent import Agent
+from spade.template import Template
 from spade.behaviour import CyclicBehaviour, FSMBehaviour, State
 from spade.message import Message
-
+from pathlib import Path
+import agentspeak
+from spade_bdi.bdi import BDIAgent
 
 Environment_height = 15
 Environment_width = 25
@@ -758,11 +761,14 @@ class VolunteerFSM(FSMBehaviour):
     class Available(State):
         async def run(self):
             volunteer = self.agent
+            if volunteer.current_assign is not None:
+                self.set_next_state("MOVING")
+                return
             if not volunteer.on_duty:
                 self.set_next_state("OFF_DUTY")
                 return
 
-            msg = await self.receive(timeout=1)
+            msg = await self.receive(timeout=0.25)
             if msg:
                 parts = msg.body.split()
                 if len(parts) == 3 and parts[0] == "HELP":
@@ -773,12 +779,7 @@ class VolunteerFSM(FSMBehaviour):
                     else:
                         distance = volunteer.consider_incident(x, y)
                         if distance is not None and (x, y) not in volunteer.offered:
-                            volunteer.offered.add((x, y))
-                            offer = Message(to="operator@localhost")
-                            offer.set_metadata("performative", "inform")
-                            offer.body = f"OFFER {x} {y} {distance}"
-                            await self.send(offer)
-                            print(f"[{volunteer.jid}] Offering help at {(x, y)}, distance {distance}")
+                            volunteer.bdi.set_belief("incident", x, y, distance)
 
                 elif len(parts) == 3 and parts[0] == "ASSIGN":
                     try:
@@ -792,11 +793,7 @@ class VolunteerFSM(FSMBehaviour):
                         # the volunteer and assigns it directly.
                         accepts = coords in volunteer.offered or not volunteer.bidding
                         if accepts and volunteer.can_respond():
-                            volunteer.current_assign = coords
-                            volunteer.intention = {"goal": "assist_patient", "target": coords}
-                            print(f"[{volunteer.jid}] Accepted assignment {coords}")
-                            self.set_next_state("MOVING")
-                            return
+                            volunteer.bdi.set_belief("assigned", x, y)
 
             self.set_next_state("AVAILABLE")
 
@@ -861,7 +858,8 @@ class VolunteerFSM(FSMBehaviour):
                 self.set_next_state("AVAILABLE")
                 return
 
-            volunteer.beliefs["patient_confirmed"] = True
+            volunteer.patient_confirmed = True
+            volunteer.bdi.set_belief("patient_confirmed", x, y)
             print(f"[{volunteer.jid}] Confirmed collapsed patient at {target}")
             report = Message(to="operator@localhost")
             report.set_metadata("performative", "inform")
@@ -893,12 +891,13 @@ class VolunteerFSM(FSMBehaviour):
             self.set_next_state("AVAILABLE" if self.agent.on_duty else "OFF_DUTY")
 
 
-class VolunteerAgent(WalkingAgent):
+class VolunteerAgent(BDIAgent, WalkingAgent):
     can_identify_collapse = True
 
     def __init__(self, jid, password, status="AVAILABLE", training="basic",
                  has_firstAid=True, max_distance=30, bidding=True):
-        super().__init__(jid, password)
+        asl_file = str(Path(__file__).with_name("volunteer.asl"))
+        super().__init__(jid, password, asl_file)        
         self.x, self.y = None, None
         self.target_x, self.target_y = None, None
         self.walk_behaviour = None
@@ -910,26 +909,102 @@ class VolunteerAgent(WalkingAgent):
         self.bidding = bidding
         self.current_assign = None
         self.offered = set()
-        self.beliefs = {"on_duty": self.on_duty, "known_incidents": {}, "patient_confirmed": False}
-        self.desires = ["respond_if_capable", "provide_first_aid", "avoid_duplicate_response"]
-        self.intention = None
+        self.known_incidents = {}
+        self.patient_confirmed = False
+
+        if self.on_duty:
+            self.bdi.set_belief("on_duty")
+
+        if self.is_trained():
+            self.bdi.set_belief("trained")
+
+        if self.has_firstAid:
+            self.bdi.set_belief("first_aid")
+
+    
+    def add_custom_actions(self, actions):
+        # AgentSpeak action for offering help to the operator.
+        @actions.add(".offer_help", 3)
+        def offer_help(agent, term, intention):
+            x, y, distance = (
+                int(agentspeak.grounded(arg, intention.scope))
+                for arg in term.args
+            )
+
+            coords = (x, y)
+
+            if self.bidding and self.can_respond() and coords not in self.offered:
+                self.offered.add(coords)
+
+                msg = Message(to="operator@localhost")
+                msg.set_metadata("performative", "inform")
+                msg.body = f"OFFER {x} {y} {distance}"
+
+                self.submit(self.bdi.send(msg))
+                print(f"[{self.jid}] BDI offered help at {coords}, distance {distance}")
+
+            yield
+
+        # AgentSpeak action for committing to an assignment.
+        @actions.add(".commit_response", 2)
+        def commit_response(agent, term, intention):
+            x, y = (
+                int(agentspeak.grounded(arg, intention.scope))
+                for arg in term.args
+            )
+
+            coords = (x, y)
+
+            if self.can_respond() and (not self.bidding or coords in self.offered):
+                self.current_assign = coords
+                print(f"[{self.jid}] BDI accepted assignment {coords}")
+
+            yield
+
+    def is_trained(self):
+        return str(self.training).strip().lower() not in (
+            "", "none", "untrained", "false", "0"
+        )
+
 
     def can_respond(self):
-        return (self.on_duty and self.current_assign is None
-                and self.x is not None and self.y is not None
-                and self.training not in (None, "none", "untrained"))
+        return (
+        self.on_duty
+        and self.current_assign is None
+        and self.x is not None
+        and self.y is not None
+        and self.is_trained()
+    )
 
     def consider_incident(self, x, y):
         if not self.can_respond() or not within_E(x, y):
             return None
+
         distance = abs(self.x - x) + abs(self.y - y)
-        self.beliefs["known_incidents"][(x, y)] = {"distance": distance}
-        return distance if distance <= self.max_distance else None
+
+        if distance > self.max_distance:
+            return None
+
+        self.known_incidents[(x, y)] = distance
+        return distance
 
     def finish_assignment(self):
+        coords = self.current_assign
+
+        if coords is not None:
+            self.bdi.remove_belief("assigned", *coords)
+
+            distance = self.known_incidents.pop(coords, None)
+            if distance is not None:
+                self.bdi.remove_belief("incident", *coords, distance)
+
+            if self.patient_confirmed:
+                self.bdi.remove_belief("patient_confirmed", *coords)
+
+            self.offered.discard(coords)
+
         self.current_assign = None
-        self.intention = None
-        self.beliefs["patient_confirmed"] = False
+        self.patient_confirmed = False
 
     async def insert(self, x, y):
         # Do not attach the default ByStand behaviour to a volunteer.
@@ -959,7 +1034,7 @@ class VolunteerAgent(WalkingAgent):
         fsm.add_transition(source="OFF_DUTY", dest="OFF_DUTY")
         fsm.add_transition(source="OFF_DUTY", dest="AVAILABLE")
 
-        self.add_behaviour(fsm)
+        self.add_behaviour(fsm, Template(metadata={"performative": "inform"}))
 
 
 
