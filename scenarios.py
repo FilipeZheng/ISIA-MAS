@@ -11,12 +11,13 @@ trigger different things at different times.
 """
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import spade
 
 from agents import (
+    AEDAgent,
     AMBULANCE_MODE_CLOSEST,
     AMBULANCE_MODES,
     AMBULANCE_REPOSITION_MODES,
@@ -41,14 +42,15 @@ from agents import (
 class AgentPlacement:
     """Where one agent starts and the first place it walks to."""
 
-    kind: str                       # "person", "volunteer" or "ambulance"
+    kind: str                       # "person", "aed" or "ambulance"
     jid: str
     x: int
     y: int
     target: tuple = None
     walk_speed: float = None
     has_aed: bool = False           # only used by ambulances
-    volunteer_status: str = "AVAILABLE"   # only used by volunteers
+    has_citizen_sensor: bool = False  # whether the agent carries a
+                                     # citizen sensor
 
 
 @dataclass(frozen=True)
@@ -63,8 +65,8 @@ class ScenarioEvent:
 def collapse_at(seconds, jid, false_alarm=False, severity=1):
     """Return an event that makes the given agent collapse at ``seconds``.
 
-    Set ``false_alarm=True`` for a collapse that only needs a volunteer (the
-    ambulance is stood down once a volunteer or an ambulance identifies it).
+    Set ``false_alarm=True`` for a collapse that only needs a responder (the
+    ambulance is stood down once a responder or an ambulance identifies it).
     Set ``severity=3`` for a collapse that needs an AED (unless the responding
     ambulance carries one).
     """
@@ -83,8 +85,14 @@ DEFAULT_PLACEMENTS = (
                    target=(0, 8), walk_speed=1),
 )
 
+# Like DEFAULT_PLACEMENTS, but the people carry a citizen sensor.
+ALL_COLLAPSE_CIT_SENSOR_PLACEMENTS = tuple(
+    replace(placement, has_citizen_sensor=True)
+    for placement in DEFAULT_PLACEMENTS
+)
+
 AMBULANCE_PLACEMENT0 = (
-    AgentPlacement("ambulance", "ambulance0@localhost", 19, 9),
+    AgentPlacement("ambulance", "ambulance0@localhost", 15, 9),
     AgentPlacement("ambulance", "ambulance1@localhost", 24, 2),
 )
 
@@ -92,9 +100,9 @@ AMBULANCE_PLACEMENT1 = (
     AgentPlacement("ambulance", "ambulance0@localhost", 24, 14),
 )
 
-VOLUNTEER_PLACEMENTS0 = (
-    AgentPlacement("volunteer", "volunteer0@localhost", 2, 3),
-    AgentPlacement("volunteer", "volunteer1@localhost", 16, 6),
+AED_PLACEMENTS0 = (
+    AgentPlacement("aed", "aed0@localhost", 2, 3),
+    AgentPlacement("aed", "aed1@localhost", 16, 6),
 )
 
 MULTIPLE_COLLAPSE_PLACEMENT = (
@@ -110,20 +118,19 @@ MULTIPLE_COLLAPSE_PLACEMENT = (
     AgentPlacement("ambulance", "ambulance1@localhost", 15, 5),
 )
 
-MULTIPLE_COLLAPSE_VOLUNTEER = (
-    AgentPlacement("volunteer", "volunteer0@localhost", 0, 8),
+MULTIPLE_COLLAPSE_AED = (
+    AgentPlacement("aed", "aed0@localhost", 0, 8),
 )
 
 # Two collapses that the ambulance-selection mode has to handle differently:
 # a severity-3 collapse (needs an AED) and a severity-1 collapse, with one
 # ambulance nearby (no AED) and one far away (carries an AED). The second
-# victim is an off-duty volunteer so it does not walk towards the first
-# collapse before it goes down itself.
+# victim is an AED agent, which may also be drawn towards the first collapse
+# as a bystander before it goes down itself.
 DISPATCH_MODE_PLACEMENT = (
     AgentPlacement("person", "agent0@localhost", 3, 5),
     AgentPlacement("person", "bystander0@localhost", 3, 3),
-    AgentPlacement("volunteer", "agent1@localhost", 3, 6,
-                   volunteer_status="OFF_DUTY"),
+    AgentPlacement("aed", "agent1@localhost", 3, 6),
     AgentPlacement("ambulance", "ambulance0@localhost", 0, 6),
     AgentPlacement("ambulance", "ambulance1@localhost", 24, 14,
                    has_aed=True),
@@ -139,16 +146,24 @@ SCENARIOS = {
             collapse_at(5, "agent0@localhost"),
         ),
     },
-    "scenario1": {
-        "title": "Scenario 1 (with volunteers)",
-        "placements": VOLUNTEER_PLACEMENTS0 + DEFAULT_PLACEMENTS + AMBULANCE_PLACEMENT0,
+    "AllCollapseWithCitSensors": {
+        "title": "All collapse, everyone with a citizen sensor",
+        "placements": ALL_COLLAPSE_CIT_SENSOR_PLACEMENTS + AMBULANCE_PLACEMENT0,
         "events": (
             collapse_at(5, "agent0@localhost"),
+            collapse_at(5, "agent1@localhost"),
+        ),
+    },
+    "AED_example": {
+        "title": "AED Example",
+        "placements": AED_PLACEMENTS0 + DEFAULT_PLACEMENTS + AMBULANCE_PLACEMENT0,
+        "events": (
+            collapse_at(2, "agent0@localhost",severity=3),
         ),
     },
     "falseAlarmExample": {
-        "title": "False alarm example (with volunteers)",
-        "placements": VOLUNTEER_PLACEMENTS0 + DEFAULT_PLACEMENTS + AMBULANCE_PLACEMENT1,
+        "title": "False alarm example (with AED agents)",
+        "placements": AED_PLACEMENTS0 + DEFAULT_PLACEMENTS + AMBULANCE_PLACEMENT1,
         "events": (
             collapse_at(5, "agent0@localhost", false_alarm=True),
         ),
@@ -254,20 +269,19 @@ def reset_environment():
 def _create_agent(placement):
     """Build the agent described by a placement."""
     if placement.kind == "person":
-        return WalkingAgent(placement.jid, "password")
-    if placement.kind == "volunteer":
-        return VolunteerAgent(
-            placement.jid, "password", status=placement.volunteer_status,
-            training="basic", has_firstAid=True,
-            bidding=current_volunteer_mode == VOLUNTEER_MODE_BIDDING,
-        )
-    if placement.kind == "ambulance":
-        return EmergencyAmbulance(
+        agent = WalkingAgent(placement.jid, "password")
+    elif placement.kind == "aed":
+        agent = AEDAgent(placement.jid, "password")
+    elif placement.kind == "ambulance":
+        agent = EmergencyAmbulance(
             placement.jid, "password",
             has_aed=placement.has_aed,
             reposition=current_ambulance_reposition == AMBULANCE_REPOSITION_ON,
         )
-    raise ValueError(f"Unknown agent kind: {placement.kind}")
+    else:
+        raise ValueError(f"Unknown agent kind: {placement.kind}")
+    agent.has_citizen_sensor = placement.has_citizen_sensor
+    return agent
 
 
 async def setup_scenario(name="default"):
@@ -302,6 +316,8 @@ def print_environment():
                 line += "H"
             elif any(isinstance(obj, EmergencyAmbulance) for obj in cell):
                 line += "A"
+            elif any(isinstance(obj, AEDAgent) for obj in cell):
+                line += "D"
             elif any(isinstance(obj, VolunteerAgent) for obj in cell):
                 line += "V"
             else:

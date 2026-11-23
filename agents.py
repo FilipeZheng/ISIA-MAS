@@ -338,18 +338,40 @@ class ByStand(CyclicBehaviour):
             await agent.move_to(*target)
 
 class CitSensor(CyclicBehaviour):
+    """A citizen sensor attached to a collapsed agent.
+
+    When the agent collapses the sensor tells the operator about the
+    collapse. It stays active while the agent is collapsed, in case it
+    receives further HELP calls in the environment.
+    """
+
+    # Whether the collapse of the attached agent has already been
+    # reported to the operator.
+    reported = False
+
     async def run(self):
         agent = self.agent
-        msg = None
+        if not self.reported and agent.collapsed and agent.x is not None:
+            self.reported = True
+            await self._report_collapse(agent.x, agent.y)
         msg = await self.receive(timeout=10)
-        if msg:
-            msg_type,*body = msg.body.split()
-            x, y =body
-            if msg_type=="HELP":
-                msg = Message(to="operator@localhost")
-                msg.set_metadata("performative","inform")
-                msg.body = f"COLLAPSE {x} {y}"
-                await self.send(msg)
+        if msg is None or not msg.body:
+            return
+        parts = msg.body.split()
+        if not parts or parts[0] != "HELP":
+            return
+        try:
+            x, y = map(int, parts[1:3])
+        except ValueError:
+            return
+        await self._report_collapse(x, y)
+
+    async def _report_collapse(self, x, y):
+        """Tell the operator about a collapse at (x, y)."""
+        msg = Message(to="operator@localhost")
+        msg.set_metadata("performative", "inform")
+        msg.body = f"COLLAPSE {x} {y}"
+        await self.send(msg)
 
 class AEDBehav(CyclicBehaviour):
     async def run(self):
@@ -391,6 +413,9 @@ class WalkingAgent(Agent):
     severity=1      #Higher values are more serious; 3 needs an AED
     # Only volunteers and ambulances can tell a false alarm from a real one.
     can_identify_collapse=False
+    # Whether the agent carries a citizen sensor that tells the operator
+    # about its collapse.
+    has_citizen_sensor=False
     async def setup(self):
         pass
         #print(f"{self.jid} created.")
@@ -462,6 +487,10 @@ class WalkingAgent(Agent):
         # Call the people around for help; a bystander will report the collapse
         # to the operator once it gets here.
         self.add_behaviour(Collapsed())
+        if self.has_citizen_sensor:
+            # A citizen sensor on the collapsed agent tells the operator
+            # about the collapse.
+            self.add_behaviour(CitSensor())
 
     def identify_false_alarm(self, assessor):
         """Tell whether this collapse is a false alarm.
@@ -1395,8 +1424,8 @@ class Operator_Behav(CyclicBehaviour):
         best_distance = -1
         for y in range(Environment_height):
             for x in range(Environment_width):
-                nearest = min(
-                    abs(x - a.x) + abs(y - a.y) for a in ambulances
+                nearest = min( # Evaluate distance from other ambulances as well as distance from walls
+                    min(abs(x - a.x) + abs(y - a.y), x, y, Environment_height-y, Environment_width-x) for a in ambulances
                 )
                 if nearest > best_distance:
                     best_distance = nearest

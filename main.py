@@ -60,6 +60,7 @@ REFRESH_INTERVAL = "1"
 # Label and colour used to draw each agent kind in a scenario preview.
 PREVIEW_LABELS = {
     "person": ("P", "person"),
+    "aed": ("D", "aed"),
     "volunteer": ("V", "volunteer"),
     "ambulance": ("A", "ambulance"),
 }
@@ -97,6 +98,14 @@ def _describe_cell(cell):
             else:
                 labels.append("V")
                 classes.append("volunteer")
+            occupants.append(f"{obj.jid}{' (collapsed)' if obj.collapsed else ''}")
+        elif isinstance(obj, agents.AEDAgent):
+            if obj.collapsed:
+                labels.append("C")
+                classes.append("collapsed")
+            else:
+                labels.append("D")
+                classes.append("aed")
             occupants.append(f"{obj.jid}{' (collapsed)' if obj.collapsed else ''}")
         elif isinstance(obj, agents.WalkingAgent):
             if obj.collapsed:
@@ -154,8 +163,8 @@ def _preview_layout(name):
 
 
 def _live_counts():
-    """Return (people, volunteers, ambulances, hospitals) in the environment."""
-    people = volunteers = ambulances = hospitals = 0
+    """Return (people, volunteers, aeds, ambulances, hospitals) in the grid."""
+    people = volunteers = aeds = ambulances = hospitals = 0
     for row in agents.Environment:
         for cell in row:
             for obj in cell:
@@ -165,22 +174,26 @@ def _live_counts():
                     ambulances += 1
                 elif isinstance(obj, agents.VolunteerAgent):
                     volunteers += 1
+                elif isinstance(obj, agents.AEDAgent):
+                    aeds += 1
                 elif isinstance(obj, agents.WalkingAgent):
                     people += 1
-    return people, volunteers, ambulances, hospitals
+    return people, volunteers, aeds, ambulances, hospitals
 
 
 def _preview_counts(name):
     """Return the number of agents a scenario will place in the environment."""
-    people = volunteers = ambulances = 0
+    people = volunteers = aeds = ambulances = 0
     for placement in scenarios.scenario_placements(name):
         if placement.kind == "person":
             people += 1
         elif placement.kind == "volunteer":
             volunteers += 1
+        elif placement.kind == "aed":
+            aeds += 1
         elif placement.kind == "ambulance":
             ambulances += 1
-    return people, volunteers, ambulances, 1  # one hospital
+    return people, volunteers, aeds, ambulances, 1  # one hospital
 
 
 def _ambulance_mode_select(selected):
@@ -416,25 +429,26 @@ def render_environment_html(preview=None, ambulance_mode=None, volunteer_mode=No
             [_describe_cell(agents.Environment[y][x]) for x in range(width)]
             for y in range(height)
         ]
-        people, volunteers, ambulances, hospitals = _live_counts()
+        people, volunteers, aeds, ambulances, hospitals = _live_counts()
     elif preview is not None:
         status = f"Preview: {scenarios.scenario_title(preview)}"
         status_class = "preview"
         layout = _preview_layout(preview)
-        people, volunteers, ambulances, hospitals = _preview_counts(preview)
+        people, volunteers, aeds, ambulances, hospitals = _preview_counts(preview)
     else:
         status, status_class = "Not started", "stopped"
         layout = [
             [_describe_cell(agents.Environment[y][x]) for x in range(width)]
             for y in range(height)
         ]
-        people, volunteers, ambulances, hospitals = _live_counts()
+        people, volunteers, aeds, ambulances, hospitals = _live_counts()
 
     counts = (
-        "people: {people} / volunteers: {volunteers} / "
+        "people: {people} / volunteers: {volunteers} / AEDs: {aeds} / "
         "ambulances: {ambulances} / hospitals: {hospitals}"
     ).format(
-        people=people, volunteers=volunteers, ambulances=ambulances, hospitals=hospitals
+        people=people, volunteers=volunteers, aeds=aeds,
+        ambulances=ambulances, hospitals=hospitals
     )
 
     show_metrics = scenarios.simulation_running or (
@@ -487,6 +501,7 @@ def render_environment_html(preview=None, ambulance_mode=None, volunteer_mode=No
   .collapsed {{ background: #d59a1a; color: #141414; }}
   .person {{ background: #2f6fd0; }}
   .volunteer {{ background: #7b5cd6; }}
+  .aed {{ background: #2a9d8f; }}
   .other {{ background: #4a4f5a; }}
   .legend {{ display: flex; gap: 16px; flex-wrap: wrap;
              margin: 18px 0 0; padding: 0; list-style: none;
@@ -543,6 +558,7 @@ def render_environment_html(preview=None, ambulance_mode=None, volunteer_mode=No
   <li><span class="hospital"></span>hospital</li>
   <li><span class="ambulance"></span>ambulance</li>
   <li><span class="person"></span>person</li>
+  <li><span class="aed"></span>AED agent</li>
   <li><span class="volunteer"></span>volunteer</li>
   <li><span class="collapsed"></span>collapsed</li>
 </ul>
